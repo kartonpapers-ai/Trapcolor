@@ -1,0 +1,13 @@
+[package]
+name = "vectorcraft-trapping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Trap Color trapping geometry, adapted from steppa-trap 0.4"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+i_overlay = "4"

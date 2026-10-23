@@ -1,3 +1,5 @@
+> **Trap Color fork:** paleta permanente de trapping basada en steppa-trap 0.4. Uso, límites y compilación: [docs/trapcolor-trapping.md](docs/trapcolor-trapping.md).
+
 <p align="center">
   <a href="https://getartcraft.com/">
     <picture>

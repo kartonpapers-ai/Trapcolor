@@ -77,6 +77,7 @@ mod textedit;
 pub mod textstyles;
 pub(crate) mod textwrap;
 pub(crate) mod threads;
+pub mod trapping;
 pub(crate) mod typecmd;
 mod typemenu;
 mod variablecmds;
@@ -278,6 +279,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(printpresets::specs());
         v.extend(printtiling::specs());
         v.extend(plugin::specs());
+        v.extend(trapping::specs());
         v.extend(cut::specs());
         v.extend(halftone::specs());
         v.extend(perspgrid::specs());

@@ -81,7 +81,11 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
 }
 
 pub fn menu(app: &mut VectorcraftApp, ui: &mut Ui) {
-    menu_item(ui, tl!("Trap…"), false, false);
+    if menu_item(ui, tl!("Trap…"), true, false) {
+        if let Err(e) = app.run("window.panel", json!({"panel": "trapping"})) {
+            app.ui.status = e;
+        }
+    }
     let last: Option<(String, String)> = pstate(ui.ctx(), "pf-last");
     let label =
         last.as_ref().map(|(_, l)| crate::i18n::fmt(tl!("Repeat {name}"), &[("name", tl!(l))])).unwrap_or_else(|| tl!("Repeat Pathfinder").into());

@@ -9,6 +9,11 @@ docs/brand/LICENSE-brand.txt.
 
 Third-party material
 
+Trap Color crates/trapping/src/lib.rs adapts steppa-trap 0.4.0 geometry by Steppa
+(kartonpapers-ai/steppa-trap, blob 349ab24379f7e4b9577401555e5b17aa95553ae7),
+MIT OR Apache-2.0. Polygon operations use i_overlay under its own license.
+The plug-in ABI wrapper is not included.
+
 This product bundles third-party material under its own licenses, listed below. The per-file
 list (author, source, license) is in ASSETS.md.
 

@@ -1,0 +1,36 @@
+name: Trap Color palette
+on:
+  pull_request:
+    paths:
+      - "crates/trapping/**"
+      - "crates/engine/**"
+      - "crates/ui-egui/**"
+      - "Cargo.*"
+      - ".github/workflows/trapping.yml"
+  push:
+    branches: ["desarrollo/paleta-trapping"]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked -p vectorcraft-trapping
+      - run: cargo test --locked -p vectorcraft-engine --test trapping
+      - run: cargo test --locked -p vectorcraft-ui-egui --test trapping_panel
+      - run: cargo clippy --locked --no-deps -p vectorcraft-trapping -p vectorcraft-engine -p vectorcraft-ui-egui --all-targets -- -D warnings
+      - run: cargo check --locked --target wasm32-unknown-unknown -p vectorcraft-web

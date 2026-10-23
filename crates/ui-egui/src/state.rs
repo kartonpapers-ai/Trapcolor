@@ -130,6 +130,7 @@ pub const ICON_PANELS: &[(&str, &str, &str)] = &[
     ("docInfo", "Document Info", "dc-list-view"),
     ("navigator", "Navigator", "map"),
     ("separations", "Separations Preview", "printer"),
+    (crate::panels::trapping::ID, "Trapping", "dc-pathfinder"),
     ("imageTrace", "Image Trace", "image"),
     ("magicWand", "Magic Wand", "wand-sparkles"),
     (crate::panels::flattener_preview::ID, "Flattener Preview", "eye"),
@@ -152,7 +153,7 @@ pub const ICON_PANEL_GROUPS: &[&[&str]] = &[
     &["stroke", "gradient", "transparency"],
     &["appearance", "graphicStyles"],
     &["artboards"],
-    &["transform", "align", "pathfinder"],
+    &["transform", "align", "pathfinder", "trapping"],
     &["character", "paragraph", "glyphs"],
     &["history", "actions", "info", "navigator"],
     &["variables"],
@@ -356,6 +357,9 @@ pub struct UiState {
     /// Flattener Preview panel: highlight, overprints, preset and options (`ui.flattenerPreview`).
     #[serde(default)]
     pub flattener_preview: crate::panels::flattener_preview::Settings,
+    /// Trap Color palette parameters, persisted independently of documents.
+    #[serde(default)]
+    pub trapping: crate::panels::trapping::Settings,
     /// Color Guide panel: Limit to Library, a swatch library id, "document" (the document's
     /// swatches) or "" (none) (`ui.colorGuideLimit`).
     #[serde(default)]
@@ -642,6 +646,7 @@ impl Default for UiState {
             color_guide: Default::default(),
             library_panel: None,
             flattener_preview: Default::default(),
+            trapping: Default::default(),
             color_guide_limit: String::new(),
             align_to: Default::default(),
             svg_options: Value::Null,

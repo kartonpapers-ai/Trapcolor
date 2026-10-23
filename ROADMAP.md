@@ -1,5 +1,7 @@
 # VectorCraft Roadmap
 
+> Trap Color fork update · 2026-10-23: persistent Trapping panel with steppa-trap 0.4 geometry, per-pair controls and transactional undo. See docs/trapcolor-trapping.md for scope and remaining limits. Upstream parity scores and estimates are unchanged.
+
 - UI.5: Shared docking adds tab reordering, docking into other groups, dock splits and resizable floating panel groups. Panel positions and return locations persist with workspaces; the native icon rail and Tools panel remain available.
 
 - UI.4: Dock and floating-panel headers use shared accessible tabs with bounded overflow. Widget-state theme application uses `craft-ui`; all four palettes, font stacks and preferences remain app-owned.

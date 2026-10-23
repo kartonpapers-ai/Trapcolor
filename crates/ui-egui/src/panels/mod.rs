@@ -42,6 +42,7 @@ pub mod tabs;
 pub mod text_styles;
 pub mod transform;
 pub mod transparency;
+pub mod trapping;
 pub mod variables;
 
 use egui::{Rect, Sense, Ui, vec2};
@@ -119,6 +120,7 @@ pub fn show_icon_panel(app: &mut VectorcraftApp, ui: &mut Ui, id: &str) {
         "actions" => actions::show(app, ui),
         "info" => info::show(app, ui),
         "separations" => separations::show(app, ui),
+        trapping::ID => trapping::show(app, ui),
         "artboards" => artboards::show(app, ui),
         "gradient" => gradient::show(app, ui),
         "character" => character::show(app, ui),

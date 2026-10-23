@@ -18,6 +18,7 @@ vectorcraft-geom = { path = "crates/geom" }
 vectorcraft-color = { path = "crates/color" }
 vectorcraft-doc = { path = "crates/doc" }
 vectorcraft-pathops = { path = "crates/pathops" }
+vectorcraft-trapping = { path = "crates/trapping" }
 vectorcraft-brush = { path = "crates/brush" }
 vectorcraft-trace = { path = "crates/trace" }
 vectorcraft-text = { path = "crates/text" }
