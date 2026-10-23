@@ -4247,3 +4247,10 @@ lighting	Light	ライト
 @msg	unknown parameter `{key}`; the command takes: {keys}	`{key}` は不明なパラメーターです。このコマンドで使えるパラメーター: {keys}
 	Load EPS into Clipboard	EPS をクリップボードに読み込む
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} ピクセルの画像は大きすぎて描画できません
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	Project KX27 について
+	Quit Project KX27	Project KX27 を終了
+	Project KX27 Help…	Project KX27 ヘルプ…
+	Hide Project KX27	Project KX27 を隠す
+@msg	Loading Project KX27…	Project KX27 を読み込んでいます…

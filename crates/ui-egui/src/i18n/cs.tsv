@@ -4685,3 +4685,10 @@ mark-style	Japanese	Japonské
 @msg	unknown parameter `{key}`; the command takes: {keys}	neznámý parametr `{key}`; příkaz přijímá: {keys}
 	Load EPS into Clipboard	Načíst EPS do schránky
 @msg	an image of {w} × {h} pixels is too large to draw	obraz o velikosti {w} × {h} obrazových bodů je příliš velký na vykreslení
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	O aplikaci Project KX27
+	Quit Project KX27	Ukončit Project KX27
+	Project KX27 Help…	Nápověda Project KX27…
+	Hide Project KX27	Skrýt Project KX27
+@msg	Loading Project KX27…	Načítání Project KX27u…

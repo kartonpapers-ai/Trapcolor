@@ -1,4 +1,4 @@
-# Trap Color: paleta de trapping
+# Project KX27: paleta de trapping
 
 Estado: primera integración, 2026-10-23. No cambia la calificación alfa del editor.
 
@@ -55,6 +55,6 @@ Cubren un panel poblado en tema oscuro de 340 px y claro de 280 px.
 
 ## Compilación web y GitHub Pages
 
-El workflow **Trap Color web** compila la aplicación completa con Trunk y deja un artefacto `trapcolor-web` en GitHub Actions. Los pushes a la rama de desarrollo solo generan el artefacto. Los pushes a `main` compilan y publican en GitHub Pages.
+El workflow **Project KX27 web** compila la aplicación completa con Trunk y deja un artefacto `trapcolor-web` en GitHub Actions. Los pushes a la rama de desarrollo solo generan el artefacto. Los pushes a `main` compilan y publican en GitHub Pages.
 
 Para alojarla, habilita **Settings → Pages → Source: GitHub Actions** en el repositorio. Una vez que el workflow esté en la rama principal, ejecútalo con **Run workflow** y la opción **publish** activada. La acción de despliegue devuelve la URL real. La configuración inicial de Pages requiere permisos de administración y no puede activarse con el `GITHUB_TOKEN` normal del workflow.

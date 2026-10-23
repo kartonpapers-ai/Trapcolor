@@ -1,4 +1,4 @@
-name: Trap Color web
+name: Project KX27 web
 on:
   push:
     branches: ["main", "desarrollo/paleta-trapping"]

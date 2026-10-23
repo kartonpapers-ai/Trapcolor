@@ -3693,3 +3693,10 @@ axis	Both	Ambos
 @msg	unknown parameter `{key}`; the command takes no parameters	parâmetro desconhecido `{key}`; o comando não tem parâmetros
 @msg	unknown parameter `{key}`; the command takes: {keys}	parâmetro desconhecido `{key}`; o comando aceita: {keys}
 	Load EPS into Clipboard	Carregar EPS na Área de Transferência
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	Sobre o Project KX27
+	Quit Project KX27	Sair do Project KX27
+	Project KX27 Help…	Ajuda do Project KX27…
+	Hide Project KX27	Ocultar o Project KX27
+@msg	Loading Project KX27…	Carregando o Project KX27…

@@ -1,4 +1,4 @@
-name: Trap Color palette
+name: Project KX27 palette
 on:
   pull_request:
     paths:

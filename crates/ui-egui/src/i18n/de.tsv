@@ -4208,3 +4208,10 @@ theme	Appearance	Erscheinungsbild
 @msg	unknown parameter `{key}`; the command takes: {keys}	unbekannter Parameter `{key}`; der Befehl akzeptiert: {keys}
 	Load EPS into Clipboard	EPS in die Zwischenablage laden
 @msg	an image of {w} × {h} pixels is too large to draw	ein Bild mit {w} × {h} Pixeln ist zu groß, um gezeichnet zu werden
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	Über Project KX27
+	Quit Project KX27	Project KX27 beenden
+	Project KX27 Help…	Project KX27-Hilfe…
+@msg	Loading Project KX27…	Project KX27 wird geladen…
+	Hide Project KX27	Project KX27 ausblenden

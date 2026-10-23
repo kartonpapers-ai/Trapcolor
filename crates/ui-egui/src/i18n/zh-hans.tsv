@@ -3844,3 +3844,10 @@ lighting	Light	光源
 @msg	unknown parameter `{key}`; the command takes: {keys}	未知参数 `{key}`；该命令接受：{keys}
 	Load EPS into Clipboard	将 EPS 载入剪贴板
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} 像素的图像过大，无法绘制
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	关于 Project KX27
+	Quit Project KX27	退出 Project KX27
+	Project KX27 Help…	Project KX27 说明…
+	Hide Project KX27	隐藏 Project KX27
+	Project KX27	Project KX27

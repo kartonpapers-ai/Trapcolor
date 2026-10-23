@@ -4235,3 +4235,10 @@ theme	Appearance	Giao diện
 @msg	{tool} isn't in a toolbar group of several tools	{tool} không nằm trong nhóm thanh công cụ có nhiều công cụ
 	Load EPS into Clipboard	Tải EPS vào bảng tạm
 @msg	an image of {w} × {h} pixels is too large to draw	ảnh {w} × {h} điểm ảnh quá lớn nên không thể vẽ
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	Giới thiệu Project KX27
+	Hide Project KX27	Ẩn Project KX27
+	Quit Project KX27	Thoát Project KX27
+	Project KX27 Help…	Trợ giúp Project KX27…
+@msg	Loading Project KX27…	Đang tải Project KX27…

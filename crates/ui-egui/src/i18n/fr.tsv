@@ -4684,3 +4684,10 @@ mark-style	Japanese	Japonais
 theme	Appearance	Apparence
 	Load EPS into Clipboard	Charger un EPS dans le presse-papiers
 @msg	an image of {w} × {h} pixels is too large to draw	une image de {w} × {h} pixels est trop grande pour être dessinée
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	À propos de Project KX27
+	Quit Project KX27	Quitter Project KX27
+	Project KX27 Help…	Aide de Project KX27…
+@msg	Loading Project KX27…	Chargement de Project KX27…
+	Hide Project KX27	Masquer Project KX27

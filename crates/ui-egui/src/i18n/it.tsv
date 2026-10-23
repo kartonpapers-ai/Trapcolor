@@ -4253,3 +4253,10 @@ lighting	Light	Luce
 @msg	unknown parameter `{key}`; the command takes: {keys}	parametro sconosciuto `{key}`; il comando accetta: {keys}
 	Load EPS into Clipboard	Carica EPS negli appunti
 @msg	an image of {w} × {h} pixels is too large to draw	un'immagine di {w} × {h} pixel è troppo grande per essere disegnata
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	Informazioni su Project KX27
+	Quit Project KX27	Esci da Project KX27
+	Project KX27 Help…	Aiuto di Project KX27…
+@msg	Loading Project KX27…	Caricamento di Project KX27…
+	Hide Project KX27	Nascondi Project KX27

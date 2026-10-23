@@ -4625,3 +4625,10 @@ mark-style	Japanese	Japonesas
 @msg	unknown parameter `{key}`; the command takes: {keys}	parámetro desconocido `{key}`; el comando acepta: {keys}
 	Load EPS into Clipboard	Cargar EPS en el portapapeles
 @msg	an image of {w} × {h} pixels is too large to draw	una imagen de {w} × {h} píxeles es demasiado grande para dibujarse
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	Acerca de Project KX27
+	Quit Project KX27	Salir de Project KX27
+	Project KX27 Help…	Ayuda de Project KX27…
+@msg	Loading Project KX27…	Cargando Project KX27…
+	Hide Project KX27	Ocultar Project KX27

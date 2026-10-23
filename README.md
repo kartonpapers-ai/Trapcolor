@@ -1,4 +1,6 @@
-> **Trap Color fork:** paleta permanente de trapping basada en steppa-trap 0.4. Uso, límites y compilación: [docs/trapcolor-trapping.md](docs/trapcolor-trapping.md).
+> Fork de VectorCraft. Nombre en clave y alcance: [Project KX27](docs/project-kx27.md).
+>
+> **Project KX27:** paleta permanente de trapping basada en steppa-trap 0.4. Uso, límites y compilación: [docs/trapcolor-trapping.md](docs/trapcolor-trapping.md).
 
 <p align="center">
   <a href="https://getartcraft.com/">
@@ -10,7 +12,7 @@
 </p>
 
 
-<h1 align="center">VectorCraft</h1>
+<h1 align="center">Project KX27</h1>
 
 <p align="center">
   <b>Vector illustration; an open-source, clean-room reimplementation of Adobe Illustrator, rebuilt in pure Rust.</b>

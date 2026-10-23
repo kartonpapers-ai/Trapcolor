@@ -4233,3 +4233,10 @@ lighting	Light	Світло
 @msg	unknown parameter `{key}`; the command takes: {keys}	невідомий параметр `{key}`; команда приймає: {keys}
 	Load EPS into Clipboard	Завантажити EPS у буфер обміну
 @msg	an image of {w} × {h} pixels is too large to draw	зображення розміром {w} × {h} пікселів завелике для відображення
+
+# Project KX27 product-name aliases; original keys stay compatible.
+	About Project KX27	Про програму Project KX27
+	Quit Project KX27	Вийти з Project KX27
+	Project KX27 Help…	Довідка Project KX27…
+@msg	Loading Project KX27…	Завантаження Project KX27…
+	Hide Project KX27	Приховати Project KX27
