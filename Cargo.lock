@@ -4968,6 +4968,7 @@ version = "0.10.0"
 dependencies = [
  "i_overlay",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

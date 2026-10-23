@@ -1,5 +1,7 @@
 # Architecture
 
+> Project KX27 · 2026-10-23: initial vector spot trapping preserves linked swatches/tints and overprint fills, with native per-object rule metadata and PDF export regressions. Images and technical inks remain unsupported; RIP validation is pending. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).
+
 > Trap Color fork update · 2026-10-23: persistent Trapping panel with steppa-trap 0.4 geometry, per-pair controls and transactional undo. See trapcolor-trapping.md for scope and remaining limits. Upstream parity scores and estimates are unchanged.
 
 > **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (desktop printing uses craft-print; Windows 7 fallback retained) · **Target:** Adobe Illustrator 2026 (30.x)

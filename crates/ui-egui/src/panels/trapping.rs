@@ -11,7 +11,7 @@ use crate::{VectorcraftApp, widgets};
 pub const ID: &str = "trapping";
 const DIRECTIONS: [&str; 3] = ["Claro hacia oscuro", "Invertida", "Centrada"];
 const DIRECTION_IDS: [&str; 3] = ["auto", "reverse", "center"];
-const BLACK: [&str; 2] = ["Simular sobreimpresión", "Aplicar trapping"];
+const BLACK: [&str; 2] = ["Sobreimprimir negro", "Aplicar trapping"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -171,7 +171,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     for pair in &pairs {
         let Some(id) = pair["id"].as_u64() else { continue };
         let name = pair["name"].as_str().unwrap_or("Trap");
-        let key = ui.id().with(("trap-pair", doc_uid, id, name));
+        let key = ui.id().with(("trap-pair", doc_uid, id, name, pair["widthMm"].as_f64().unwrap_or_default().to_bits(), pair["relation"].as_str()));
         let initial = PairEdit {
             width: pair["widthMm"].as_f64().filter(|v| *v >= 0.01).unwrap_or(settings.width_mm),
             mode: match pair["relation"].as_str() {
@@ -187,11 +187,11 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         let has_black = pair["blackLeft"].as_bool().unwrap_or(false) || pair["blackRight"].as_bool().unwrap_or(false) || pair["relation"] == "S";
         let forward = format!("{left} hacia {right}");
         let reverse = format!("{right} hacia {left}");
-        let modes = [forward.as_str(), reverse.as_str(), "Centrado", "Sin trap", "Simular sobreimpresión K"];
+        let modes = [forward.as_str(), reverse.as_str(), "Centrado", "Sin trap", "Sobreimprimir negro K"];
         let modes = if has_black { &modes[..] } else { &modes[..4] };
         edit.mode = edit.mode.min(modes.len().saturating_sub(1));
         ui.push_id(id, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.strong(format!("{left} / {right}"));
                 if ui
                     .button("Localizar")
@@ -224,8 +224,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         widgets::divider(ui);
     }
     ui.collapsing("Alcance de esta versión", |ui| {
-        ui.label("Motor steppa-trap 0.4: rellenos planos de proceso, sin contornos ni transparencias. RGB usa conversión simple a CMYK.");
-        ui.label("La sobreimpresión se simula combinando CMYK. No admite tintas directas, textos ni imágenes. Las curvas se aproximan con segmentos.");
+        ui.label("CMYK y muestras spot planas con sus porcentajes, sin contornos ni transparencias. RGB usa conversión simple a CMYK.");
+        ui.label("Los traps conservan las tintas y sobreimprimen. Para ver la aproximación en pantalla, activa View → Overprint Preview. No admite imágenes ni tintas técnicas.");
         ui.label("Los traps existentes conservan sus ajustes. Selecciona todo el arte que pueda tapar un encuentro. Máximo: 80 trazados y 12.000 nodos por operación.");
     });
     app.ui.trapping = settings;

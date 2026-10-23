@@ -1,5 +1,7 @@
 # VectorCraft Roadmap
 
+> Project KX27 · 2026-10-23: initial vector spot trapping preserves linked swatches/tints and overprint fills, with native per-object rule metadata and PDF export regressions. Images and technical inks remain unsupported; RIP validation is pending. Upstream parity scores and estimates are unchanged. See [trapping scope](docs/trapcolor-trapping.md).
+
 > Trap Color fork update · 2026-10-23: persistent Trapping panel with steppa-trap 0.4 geometry, per-pair controls and transactional undo. See docs/trapcolor-trapping.md for scope and remaining limits. Upstream parity scores and estimates are unchanged.
 
 - UI.5: Shared docking adds tab reordering, docking into other groups, dock splits and resizable floating panel groups. Panel positions and return locations persist with workspaces; the native icon rail and Tools panel remain available.

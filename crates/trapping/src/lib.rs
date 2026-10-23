@@ -8,6 +8,9 @@
 //!   que daría sobreimprimir el claro sobre el oscuro. Así el trap sale bien aunque quede calado,
 //!   porque la API de plugins todavía no permite marcar sobreimpresión.
 //!
+//! El host nativo solicita `nativeInks`: recibe además los rellenos de cada tinta, conservando
+//! los spots y sus porcentajes, para aplicarlos con sobreimpresión real.
+//!
 //! Coordenadas en puntos, Y hacia abajo (como las da VectorCraft).
 
 // Adapted from kartonpapers-ai/steppa-trap v0.4.0, src/trap.rs
@@ -23,6 +26,8 @@ use i_overlay::float::single::SingleFloatOverlay;
 use i_overlay::mesh::outline::offset::OutlineOffset;
 use i_overlay::mesh::style::{LineJoin, OutlineStyle};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 type Pt = [f64; 2];
 type Contorno = Vec<Pt>;
@@ -72,10 +77,16 @@ pub enum Color {
     /// Gris como tinta: 0 blanco, 1 negro.
     Gris(f64),
     Lab([f64; 3]),
+    /// A named printing plate. The alternate is display colour at this tint, never process ink.
+    Spot {
+        name: String,
+        tint: f64,
+        alternate: Box<Color>,
+    },
 }
 
 impl Color {
-    /// Read the same serialized process color used by the host adapter.
+    /// Read a host colour, including a named spot with a display alternate.
     pub fn leer(v: &Value) -> Option<Color> {
         let n = |k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(0.0);
         match v.get("model")?.as_str()? {
@@ -83,6 +94,19 @@ impl Color {
             "rgb" => Some(Color::Rgb([n("r"), n("g"), n("b")])),
             "gray" => Some(Color::Gris(n("k"))),
             "lab" => Some(Color::Lab([n("l"), n("a"), n("b")])),
+            "spot" => {
+                let name = v.get("name")?.as_str()?;
+                let tint = v.get("tint")?.as_f64()?;
+                let alt = v.get("alternate")?;
+                if name.is_empty()
+                    || name.len() > 256
+                    || !(0.0..=1.0).contains(&tint)
+                    || !matches!(alt.get("model")?.as_str()?, "cmyk" | "rgb" | "gray" | "lab")
+                {
+                    return None;
+                }
+                Some(Color::Spot { name: name.into(), tint, alternate: Box::new(Color::leer(alt)?) })
+            }
             _ => None,
         }
     }
@@ -93,6 +117,7 @@ impl Color {
             Color::Rgb([r, g, b]) => json!({"model": "rgb", "r": r, "g": g, "b": b}),
             Color::Gris(k) => json!({"model": "gray", "k": k}),
             Color::Lab([l, a, b]) => json!({"model": "lab", "l": l, "a": a, "b": b}),
+            Color::Spot { ref alternate, .. } => alternate.json(),
         }
     }
 
@@ -104,6 +129,7 @@ impl Color {
             Color::Rgb([r, g, b]) => luma(r, g, b),
             Color::Gris(k) => 1.0 - k,
             Color::Lab([l, _, _]) => l / 100.0,
+            Color::Spot { ref alternate, .. } => alternate.claridad(),
         }
     }
 
@@ -127,7 +153,7 @@ impl Color {
                 let t = |x: f64| ((1.0 - x - k) / (1.0 - k)).clamp(0.0, 1.0);
                 Some([t(r), t(g), t(b), k])
             }
-            Color::Lab(_) => None,
+            Color::Lab(_) | Color::Spot { .. } => None,
         }
     }
 }
@@ -145,9 +171,51 @@ pub fn color_trap(a: &Color, b: &Color) -> (Color, bool) {
 /// La diferencia de tinta entre dos colores (0–1): en cuánto supera cada uno al otro en alguna
 /// tinta, la menor de las dos. Rojo y naranja comparten M e Y: diferencia baja, no hace falta trap.
 pub fn diferencia_tinta(a: &Color, b: &Color) -> Option<f64> {
-    let (x, y) = (a.tintas()?, b.tintas()?);
-    let mas = |p: &[f64; 4], q: &[f64; 4]| (0..4).map(|i| p[i] - q[i]).fold(0.0, f64::max);
+    let (x, y) = (canales(a)?, canales(b)?);
+    let mas = |p: &BTreeMap<String, f64>, q: &BTreeMap<String, f64>| {
+        p.iter().map(|(ink, value)| value - q.get(ink).copied().unwrap_or(0.0)).fold(0.0, f64::max)
+    };
     Some(mas(&x, &y).min(mas(&y, &x)))
+}
+
+fn canales(c: &Color) -> Option<BTreeMap<String, f64>> {
+    match c {
+        Color::Spot { name, tint, .. } => Some(BTreeMap::from([(format!("spot:{name}"), *tint)])),
+        _ => Some(["C", "M", "Y", "K"].into_iter().zip(c.tintas()?).map(|(n, v)| (n.into(), v)).collect()),
+    }
+}
+
+/// A native host paints these as independent overprinting fills. No spot is converted to CMYK.
+fn ink_fills(a: &Color, b: &Color) -> Vec<Value> {
+    let mut process = [0.0_f64; 4];
+    let mut spots: BTreeMap<&str, (f64, &Color)> = BTreeMap::new();
+    for c in [a, b] {
+        match c {
+            Color::Spot { name, tint, alternate } => {
+                let slot = spots.entry(name).or_insert((*tint, alternate));
+                if *tint > slot.0 {
+                    *slot = (*tint, alternate);
+                }
+            }
+            _ => {
+                if let Some(inks) = c.tintas() {
+                    for (old, new) in process.iter_mut().zip(inks) {
+                        *old = old.max(new);
+                    }
+                }
+            }
+        }
+    }
+    let mut fills = Vec::new();
+    if process.iter().any(|v| *v > 0.0) {
+        fills.push(json!({"type":"solid", "color":Color::Cmyk(process).json()}));
+    }
+    for (name, (tint, alternate)) in spots {
+        if tint > 0.0 {
+            fills.push(json!({"type":"solid", "color":alternate.json(), "swatch":name, "tint":tint}));
+        }
+    }
+    fills
 }
 
 /// Un objeto de la selección que pinta un relleno.
@@ -300,6 +368,12 @@ fn trazado(formas: &[Forma]) -> Value {
 
 /// Nombre corto de un color por sus tintas: "Y", "C", "CM", "M50Y", "K"… (100 % no se escribe).
 pub fn etiqueta(c: &Color) -> String {
+    if let Color::Spot { name, tint, .. } = c {
+        // The legacy name parser uppercases labels and reserves punctuation. A full digest
+        // bounds the key even for names with spaces, Unicode, slashes or direction symbols.
+        let hash: String = Sha256::digest(name.as_bytes()).iter().map(|b| format!("{b:02X}")).collect();
+        return format!("SP{hash}T{}", (tint * 1_000_000.0).round() as u64);
+    }
     match c.tintas() {
         Some(t) => {
             let mut s = String::new();
@@ -395,6 +469,7 @@ pub fn leer_ajuste(nombre: &str) -> Option<Result<Option<Ajuste>, String>> {
 struct Par {
     ajuste: Ajuste,
     color: Color,
+    inks: Vec<Value>,
     zonas: Vec<Forma>,
 }
 
@@ -469,7 +544,7 @@ pub fn atrapar_con(entrada: &Value, opc: &Opciones) -> Value {
             let idx = match pares.iter().position(|p| p.ajuste.es_del_par(&la, &lb)) {
                 Some(k) => k,
                 None => {
-                    pares.push(Par { ajuste: ajuste.clone(), color, zonas: Vec::new() });
+                    pares.push(Par { ajuste: ajuste.clone(), color, inks: ink_fills(ca, cb), zonas: Vec::new() });
                     pares.len() - 1
                 }
             };
@@ -522,6 +597,9 @@ pub fn atrapar_con(entrada: &Value, opc: &Opciones) -> Value {
         // Sin trap: el objeto queda sin relleno, para ver el par y poder forzarlo.
         let fills = if p.ajuste.rel == '-' { json!([]) } else { json!([{"type": "solid", "color": p.color.json()}]) };
         let mut obj = json!({"type": tipo, "name": p.ajuste.nombre(), "path": trazado(&z), "fillRule": "nonzero", "fills": fills});
+        if entrada.get("nativeInks").and_then(Value::as_bool) == Some(true) {
+            obj["nativeFills"] = if p.ajuste.rel == '-' { json!([]) } else { json!(p.inks) };
+        }
         // Su trap anterior; si no tiene, uno viejo sin ajuste (`trap` a secas, de la versión 0.2).
         let libre = |k: usize, c: &(Value, Option<Ajuste>)| !usados[k] && c.1.as_ref().is_some_and(|a| a.es_del_par(&p.ajuste.izq, &p.ajuste.der));
         let previo = controles
@@ -863,5 +941,48 @@ mod tests {
         assert_eq!(t[0]["name"], "trap C>Y 0.10");
         assert!(anillo(&t[0]).abs() < 1e-6, "el cian entra en el amarillo: el trap queda dentro del cuadrado");
         assert_eq!(leer_ajuste("trap K/Y 0.1"), Some(Ok(Some(Ajuste { izq: "K".into(), der: "Y".into(), rel: 'S', ancho_mm: 0.1 }))));
+    }
+    fn spot(name: &str, tint: f64) -> Value {
+        json!({"model":"spot", "name":name, "tint":tint,
+            "alternate":{"model":"lab", "l":60, "a":40, "b":20}})
+    }
+
+    #[test]
+    fn identical_alternates_on_different_spot_plates_stay_distinct() {
+        let e = json!({"nativeInks":true, "objects":[
+            cuadrado(1, 0.0, 0.0, 100.0, spot("Ink A", 0.4)),
+            cuadrado(2, 30.0, 30.0, 40.0, spot("Ink B", 0.7))]});
+        let t = traps(&atrapar_con(&e, &reglas(0.1)));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0]["nativeFills"][0]["swatch"], "Ink A");
+        assert_eq!(t[0]["nativeFills"][0]["tint"], 0.4);
+        assert_eq!(t[0]["nativeFills"][1]["swatch"], "Ink B");
+        assert_eq!(t[0]["nativeFills"][1]["tint"], 0.7);
+    }
+
+    #[test]
+    fn spot_keys_roundtrip_names_with_reserved_punctuation_and_keep_black_separate() {
+        let v = spot("Prueba / > - = 青色 ".repeat(4).as_str(), 0.37);
+        let c = Color::leer(&v).unwrap();
+        let key = etiqueta(&c);
+        let a = Ajuste { izq: key.clone(), der: "K".into(), rel: '>', ancho_mm: 0.2 };
+        assert_eq!(leer_ajuste(&a.nombre()).unwrap().unwrap().unwrap().izq, key);
+        assert!(a.nombre().len() < 256);
+        let k = Color::leer(&json!({"model":"spot", "name":"Dark ink", "tint":1,
+            "alternate":{"model":"cmyk", "c":0,"m":0,"y":0,"k":1}}))
+        .unwrap();
+        assert!(!k.es_negro());
+        assert_eq!(diferencia_tinta(&k, &Color::Cmyk([0.0, 0.0, 0.0, 1.0])), Some(1.0));
+        assert!(Color::leer(&json!({"model":"spot", "name":"Nested", "tint":1,"alternate":v})).is_none());
+    }
+
+    #[test]
+    fn same_spot_tints_share_ink_and_composition_uses_the_higher_tint() {
+        let a = Color::leer(&spot("Ink", 0.4)).unwrap();
+        let b = Color::leer(&spot("Ink", 0.7)).unwrap();
+        assert_eq!(diferencia_tinta(&a, &b), Some(0.0));
+        let fills = ink_fills(&a, &b);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0]["tint"], 0.7);
     }
 }

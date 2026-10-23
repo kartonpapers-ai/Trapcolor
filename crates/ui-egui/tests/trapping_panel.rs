@@ -95,3 +95,35 @@ fn trapping_panel_visual_capture() {
         h.render().unwrap().save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
     }
 }
+
+#[test]
+fn spot_names_remain_readable_with_only_the_trap_selected() {
+    let mut app = app();
+    let id = app.session.doc().unwrap().selection.objects[0].0;
+    let name = "Tinta prueba /青 con nombre largo";
+    app.run("swatch.new", json!({"name":name,"spot":true,"color":{"model":"lab","l":55,"a":40,"b":20}})).unwrap();
+    app.run("paint.setFill", json!({"ids":[id],"swatch":name,"tint":40})).unwrap();
+    let r = app.run("trapping.apply", json!({"difference":0})).unwrap();
+    app.run("select.set", json!({"ids":[r["pairs"][0]["id"]]})).unwrap();
+    let snapshot = vectorcraft_engine::cmd::trapping::snapshot(&app.session).unwrap();
+    let pair = &snapshot["pairs"][0];
+    let label = format!("{} / {}", pair["left"].as_str().unwrap(), pair["right"].as_str().unwrap());
+    assert!(label.contains(name));
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(280.0, 600.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label(&label);
+    h.get_by_label("Localizar");
+    assert!(!h.state().ui.trapping.failed);
+}
