@@ -1,7 +1,7 @@
 name: Trap Color web
 on:
   push:
-    branches: ["desarrollo/paleta-trapping"]
+    branches: ["main", "desarrollo/paleta-trapping"]
   workflow_dispatch:
     inputs:
       publish:
@@ -39,11 +39,11 @@ jobs:
           path: dist/web
           if-no-files-found: error
       - uses: actions/upload-pages-artifact@v3
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         with:
           path: dist/web
   deploy:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
     needs: build
     runs-on: ubuntu-latest
     permissions:
