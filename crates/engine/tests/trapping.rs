@@ -283,3 +283,170 @@ fn contact_analysis_empty_and_unsupported_are_atomic() {
     assert!(s.execute("trapping.analyze", &json!({})).is_err());
     assert!(std::sync::Arc::ptr_eq(&doc, &s.doc().unwrap().doc));
 }
+
+fn gradient_case(gradient_color: Value, solid_color: Value, above: bool) -> (Session, NodeId, NodeId) {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width":240,"height":140}));
+    let mut gradient_id = NodeId(0);
+    let mut solid_id = NodeId(0);
+    for is_gradient in if above { [false, true] } else { [true, false] } {
+        let x = if is_gradient { 0 } else { 80 };
+        let id = NodeId(run(&mut s, "shape.rectangle", json!({"x":x,"y":0,"width":100,"height":100}))["id"].as_u64().unwrap());
+        if is_gradient {
+            gradient_id = id;
+            run(
+                &mut s,
+                "paint.setFill",
+                json!({"gradient":{"kind":"linear","start":[0,100],"end":[0,0],"stops":[
+                {"offset":0,"color":gradient_color},{"offset":1,"color":{"model":"cmyk","c":0,"m":0,"y":0,"k":0}}]}}),
+            );
+        } else {
+            solid_id = id;
+            run(&mut s, "paint.setFill", json!({"color":solid_color}));
+        }
+        run(&mut s, "paint.setStroke", json!({"none":true}));
+    }
+    run(&mut s, "select.all", json!({}));
+    (s, gradient_id, solid_id)
+}
+
+#[test]
+fn four_gradient_cases_use_only_solid_ink_and_preserve_sources_undo_save_and_pdf() {
+    let cyan = json!({"model":"cmyk","c":1,"m":0,"y":0,"k":0});
+    let magenta = json!({"model":"cmyk","c":0,"m":1,"y":0,"k":0});
+    let yellow = json!({"model":"cmyk","c":0,"m":0,"y":1,"k":0});
+    for (g, solid) in [(cyan.clone(), yellow.clone()), (magenta.clone(), yellow), (cyan.clone(), magenta.clone()), (magenta, cyan)] {
+        for above in [false, true] {
+            let (mut s, gid, sid) = gradient_case(g.clone(), solid.clone(), above);
+            let before = s.doc().unwrap().doc.clone();
+            let undo = s.doc().unwrap().history.undo.len();
+            let report = run(&mut s, "trapping.analyze", json!({"widthMm":0.2,"direction":"reverse","difference":100}));
+            assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+            assert_eq!(report["encounters"][0]["reason"], "solidIntoGradient");
+            assert!(report["encounters"][0]["right"].as_str().unwrap().contains("Degradado"));
+            let r = run(&mut s, "trapping.apply", json!({"widthMm":0.2,"direction":"center","difference":100}));
+            assert_eq!(r["pairs"].as_array().unwrap().len(), 1);
+            assert_eq!(r["pairs"][0]["relation"], ">");
+            assert_eq!(r["pairs"][0]["solidIntoGradient"], true);
+            let doc = &s.doc().unwrap().doc;
+            assert_eq!(doc.node(gid), before.node(gid));
+            assert_eq!(doc.node(sid), before.node(sid));
+            let trap = doc.node(NodeId(r["pairs"][0]["id"].as_u64().unwrap())).unwrap();
+            assert_eq!(trap.appearance.items.len(), 1);
+            let fill = &trap.appearance.items[0];
+            assert!(fill.overprint());
+            let expected: vectorcraft_color::Color = serde_json::from_value(solid.clone()).unwrap();
+            assert_eq!(fill.paint(), &vectorcraft_color::Paint::solid(expected));
+            let bounds = trap.geometric_bounds().unwrap();
+            let edge = if above { 100.0 } else { 80.0 };
+            assert!((bounds.x0 - (edge - 0.2 * vectorcraft_trapping::PT_POR_MM)).abs() < 0.002, "{bounds:?}");
+            assert!((bounds.x1 - edge).abs() < 0.002, "{bounds:?}");
+            assert!((bounds.y0).abs() < 0.002 && (bounds.y1 - 100.0).abs() < 0.002);
+            let bytes = vectorcraft_format::save(doc, false);
+            assert_eq!(vectorcraft_format::load(&bytes).unwrap(), **doc);
+            let settings = serde_json::from_value(json!({"compression":{"compressText":false}})).unwrap();
+            let pdf = vectorcraft_pdf::export_with_report(doc, &vectorcraft_pdf::PdfOptions { settings, ..Default::default() }).unwrap();
+            let text = String::from_utf8_lossy(&pdf.bytes);
+            assert!(text.contains("/ShadingType 2"));
+            assert!(text.contains("/OP true/op true/OPM 1"));
+            let after = doc.clone();
+            assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+            run(&mut s, "edit.undo", json!({}));
+            assert_eq!(s.doc().unwrap().doc, before);
+            run(&mut s, "edit.redo", json!({}));
+            assert_eq!(s.doc().unwrap().doc, after);
+        }
+    }
+}
+
+#[test]
+fn gradient_reapply_keeps_identity_width_exclusion_and_fixed_direction() {
+    let (mut s, _, _) = gradient_case(json!({"model":"cmyk","c":1,"m":0,"y":0,"k":0}), json!({"model":"cmyk","c":0,"m":0,"y":1,"k":0}), false);
+    let first = run(&mut s, "trapping.apply", json!({}));
+    let id = first["pairs"][0]["id"].clone();
+    let r = run(&mut s, "trapping.apply", json!({"pair":{"id":id,"mode":"forward","widthMm":0.3}}));
+    assert_eq!(r["ids"], first["ids"]);
+    assert_eq!(r["pairs"][0]["widthMm"], 0.3);
+    for mode in ["reverse", "center", "overprint"] {
+        let doc = s.doc().unwrap().doc.clone();
+        assert!(s.execute("trapping.apply", &json!({"pair":{"id":id,"mode":mode}})).is_err());
+        assert!(std::sync::Arc::ptr_eq(&doc, &s.doc().unwrap().doc));
+    }
+    let r = run(&mut s, "trapping.apply", json!({"pair":{"id":id,"mode":"none","widthMm":0.3}}));
+    assert_eq!(r["pairs"][0]["relation"], "-");
+    let r = run(&mut s, "trapping.apply", json!({"resetExisting":true,"widthMm":0.15,"direction":"reverse"}));
+    assert_eq!(r["pairs"][0]["id"], id);
+    assert_eq!(r["pairs"][0]["relation"], ">");
+    assert_eq!(r["pairs"][0]["widthMm"], 0.15);
+}
+
+#[test]
+fn unsupported_gradient_paints_fail_without_editing() {
+    use vectorcraft_color::{Paint, gradient::GradientKind};
+    for variant in 0..8 {
+        let (mut s, gid, _) = gradient_case(json!({"model":"cmyk","c":1,"m":0,"y":0,"k":0}), json!({"model":"cmyk","c":0,"m":1,"y":0,"k":0}), false);
+        s.edit("Synthetic unsupported gradient", |d, _| {
+            let n = d.node_mut(gid).unwrap();
+            let mut p = n.appearance.fill_paint();
+            let Paint::Gradient(ref mut g) = p else { panic!() };
+            match variant {
+                0 => g.gradient.kind = GradientKind::Radial,
+                1 => g.gradient.stops[0].opacity = 0.5,
+                2 => g.gradient.stops[0].offset = f32::NAN,
+                3 => g.gradient.stops[0].color = vectorcraft_color::Color::Cmyk { c: f32::NAN, m: 0.0, y: 0.0, k: 0.0 },
+                4 => {
+                    let start = g.geom.unwrap().start;
+                    g.geom.as_mut().unwrap().end = start;
+                }
+                5 => g.gradient.stops.clear(),
+                6 => g.swatch = Some("Unsupported gradient link".into()),
+                _ => g.gradient.kind = GradientKind::Freeform,
+            }
+            n.appearance.items[0] = vectorcraft_doc::AppearanceItem::Fill(vectorcraft_doc::FillLayer::new(p));
+            Ok(())
+        })
+        .unwrap();
+        let before = s.doc().unwrap().doc.clone();
+        let undo = s.doc().unwrap().history.undo.len();
+        for command in ["trapping.analyze", "trapping.apply"] {
+            assert!(s.execute(command, &json!({})).is_err(), "variant {variant}");
+        }
+        assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+    }
+}
+
+// Private user-owned artwork stays local. CI runs the original synthetic cases above.
+#[test]
+fn optional_user_gradient_files() {
+    for (key, pdf) in [("KX27_GRADIENT_SVG", false), ("KX27_GRADIENT_PDF", true)] {
+        let Ok(path) = std::env::var(key) else { continue };
+        let bytes = std::fs::read(path).unwrap();
+        let doc = if pdf { vectorcraft_pdf::import(&bytes).unwrap() } else { vectorcraft_svg::import(std::str::from_utf8(&bytes).unwrap()).unwrap() };
+        let mut ids = Vec::new();
+        doc.walk(|n| {
+            if matches!(n.kind, vectorcraft_doc::NodeKind::Path { .. } | vectorcraft_doc::NodeKind::Compound { .. })
+                && !n.appearance.fill_paint().is_none()
+            {
+                ids.push(n.id.0);
+            }
+        });
+        let mut s = Session::new();
+        s.add_document(doc, None);
+        let before = s.doc().unwrap().doc.clone();
+        let r = run(&mut s, "trapping.analyze", json!({"ids":ids}));
+        assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+        assert_eq!(r["encounters"].as_array().unwrap().len(), 4, "{key}: {r}");
+        let r = run(&mut s, "trapping.apply", json!({"ids":ids}));
+        assert_eq!(r["pairs"].as_array().unwrap().len(), 4);
+        for id in ids {
+            assert_eq!(s.doc().unwrap().doc.node(NodeId(id)), before.node(NodeId(id)));
+        }
+        if let Ok(dir) = std::env::var("KX27_GRADIENT_OUTPUT") {
+            std::fs::create_dir_all(&dir).unwrap();
+            let bytes = vectorcraft_pdf::export_with_report(&s.doc().unwrap().doc, &Default::default()).unwrap().bytes;
+            std::fs::write(std::path::Path::new(&dir).join(if pdf { "gradient-pdf-trapped.pdf" } else { "gradient-svg-trapped.pdf" }), bytes)
+                .unwrap();
+        }
+    }
+}

@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use vectorcraft_color::{BlendMode, Color, Paint};
+use vectorcraft_color::{BlendMode, Color, Paint, gradient::GradientKind};
 use vectorcraft_doc::{Appearance, AppearanceItem, Document, FillLayer, Node, NodeKind};
 use vectorcraft_plugins::objects;
 use vectorcraft_trapping::{Modo, Opciones, PT_POR_MM, analizar_con, atrapar_con, leer_ajuste};
@@ -103,6 +103,56 @@ fn encoded_color(doc: &Document, paint: &Paint) -> Result<Value> {
     })
 }
 
+// A gradient is only a destination/opaque occluder in this phase. It is never sampled,
+// converted, or copied into a trap. White process stops are opaque paper white, not alpha.
+fn validate_gradient(doc: &Document, paint: &Paint) -> Result<()> {
+    let Paint::Gradient(g) = paint else { return Err(bad(APPLY, "Se esperaba un degradado.")) };
+    if g.gradient.kind != GradientKind::Linear || g.freeform.is_some() || g.swatch.is_some() {
+        return Err(bad(APPLY, "Esta etapa admite degradados lineales de proceso sin vínculo a una muestra de degradado; no radiales ni libres."));
+    }
+    if !(2..=256).contains(&g.gradient.stops.len()) || !g.angle.is_finite() {
+        return Err(bad(APPLY, "El degradado necesita entre 2 y 256 paradas y una dirección válida."));
+    }
+    if let Some(geom) = g.geom {
+        let points = [geom.start, geom.end];
+        if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 4e6 || p.y.abs() > 4e6)
+            || !geom.aspect.is_finite()
+            || geom.aspect <= 0.0
+            || geom.focal.is_some()
+            || geom.start.distance(geom.end) < 1e-9
+        {
+            return Err(bad(APPLY, "La colocación del degradado no es válida para trapping."));
+        }
+    }
+    let mut previous = -1.0;
+    for stop in &g.gradient.stops {
+        if !stop.offset.is_finite()
+            || !(0.0..=1.0).contains(&stop.offset)
+            || stop.offset < previous
+            || stop.opacity != 1.0
+            || !stop.midpoint.is_finite()
+            || !(0.01..=0.99).contains(&stop.midpoint)
+        {
+            return Err(bad(APPLY, "Usa paradas ordenadas y opacas; un degradado hacia transparente no está admitido."));
+        }
+        previous = stop.offset;
+        let p = Paint::Solid { color: stop.color, swatch: stop.swatch.clone(), tint: stop.tint };
+        if encoded_color(doc, &p)?["model"] == "spot" {
+            return Err(bad(APPLY, "Los degradados spot necesitan una etapa específica. Usa un degradado de proceso."));
+        }
+    }
+    Ok(())
+}
+
+fn source_label(doc: &Document, colors: &BTreeMap<String, vectorcraft_trapping::Color>, key: &str) -> Option<String> {
+    if let Some(c) = colors.get(key) {
+        return Some(display_label(c, key));
+    }
+    let id = key.strip_prefix("GL")?.parse::<u64>().ok()?;
+    let n = doc.node(NodeId(id))?;
+    matches!(n.appearance.fill_paint(), Paint::Gradient(_)).then(|| format!("Degradado · {}", n.display_name()))
+}
+
 // Object attributes follow copies and clipboard operations without changing the file format.
 fn metadata<'a>(n: &'a Node, key: &str) -> Option<&'a str> {
     let key = format!("{META}-{key}");
@@ -149,23 +199,27 @@ fn info(s: &Session, p: &Value) -> Result<Value> {
     let blacks = black_labels(s, &ids)?;
     let colors = selected_colors(s, &ids)?;
     let label = |key: &str, id: NodeId, side: &str| {
-        colors.get(key).map_or_else(|| st.doc.node(id).and_then(|n| metadata(n, side)).unwrap_or(key).to_string(), |c| display_label(c, key))
+        source_label(&st.doc, &colors, key).unwrap_or_else(|| st.doc.node(id).and_then(|n| metadata(n, side)).unwrap_or(key).to_string())
     };
     let mut pairs = Vec::new();
     let mut artwork = 0;
+    let mut gradients = 0;
     for id in &ids {
         let Some(n) = st.doc.node(*id) else { continue };
         match control_name(n).and_then(leer_ajuste) {
             Some(Ok(Some(a))) => pairs.push(json!({
                 "id": id.0, "name": n.display_name(), "left": label(&a.izq, *id, "left"), "right": label(&a.der, *id, "right"), "leftKey": a.izq, "rightKey": a.der,
-                "relation": a.rel.to_string(), "widthMm": a.ancho_mm,
+                "relation": a.rel.to_string(), "widthMm": a.ancho_mm, "solidIntoGradient": a.der.starts_with("GL"),
                 "blackLeft": blacks.contains(&a.izq), "blackRight": blacks.contains(&a.der),
             })),
             Some(_) => {}
-            None => artwork += 1,
+            None => {
+                artwork += 1;
+                if matches!(n.appearance.fill_paint(), Paint::Gradient(_)) { gradients += 1; }
+            }
         }
     }
-    Ok(json!({"ids": selected.iter().map(|id| id.0).collect::<Vec<_>>(), "artwork": artwork, "pairs": pairs}))
+    Ok(json!({"ids": selected.iter().map(|id| id.0).collect::<Vec<_>>(), "artwork": artwork, "gradients": gradients, "pairs": pairs}))
 }
 
 fn query(s: &mut Session, p: &Value) -> Result<Value> {
@@ -232,18 +286,22 @@ fn validate(s: &Session, ids: &[NodeId]) -> Result<()> {
                 _ => None,
             })
             .collect();
-        let solid = matches!(fills.as_slice(), [f] if matches!(f.paint, Paint::Solid { .. })
-            && f.visible && !f.overprint && f.opacity == 1.0 && f.blend == BlendMode::Normal && f.effects.is_empty());
-        if solid && let Some(f) = fills.first() {
-            encoded_color(doc, &f.paint)?;
+        let compatible = matches!(fills.as_slice(), [f]
+            if f.visible && !f.overprint && f.opacity == 1.0 && f.blend == BlendMode::Normal && f.effects.is_empty());
+        if compatible && let Some(f) = fills.first() {
+            match &f.paint {
+                Paint::Solid { .. } => {
+                    encoded_color(doc, &f.paint)?;
+                }
+                Paint::Gradient(_) => validate_gradient(doc, &f.paint)?,
+                _ => return Err(bad(APPLY, "Usa un relleno sólido o degradado lineal opaco.")),
+            }
         }
         let strokes =
             n.appearance.items.iter().any(|i| matches!(i, AppearanceItem::Stroke(st) if st.width > 0.0 && !matches!(st.paint, Paint::None)));
-        if !solid || strokes || n.opacity != 1.0 || n.blend != BlendMode::Normal || !n.appearance.effects.is_empty() || n.extras().mask.is_some() {
-            return Err(bad(
-                APPLY,
-                "Usa trazados con un relleno plano de proceso o spot, sin contorno, efectos, sobreimpresión previa ni transparencia.",
-            ));
+        if !compatible || strokes || n.opacity != 1.0 || n.blend != BlendMode::Normal || !n.appearance.effects.is_empty() || n.extras().mask.is_some()
+        {
+            return Err(bad(APPLY, "Usa un relleno sólido o degradado lineal opaco, sin contorno, efectos, sobreimpresión previa ni transparencia."));
         }
     }
     if count > MAX_POINTS {
@@ -290,7 +348,10 @@ fn prepare(s: &Session, p: &Value) -> Result<(Opciones, Vec<NodeId>, Value)> {
             o["name"] = json!(rule);
             continue;
         }
-        if let Some(fill) = o.get_mut("fills").and_then(Value::as_array_mut).and_then(|v| v.first_mut()) {
+        if matches!(n.appearance.fill_paint(), Paint::Gradient(_)) {
+            // Host-only marker; the legacy plug-in contract and source paint are unchanged.
+            o["opaqueLinear"] = json!(true);
+        } else if let Some(fill) = o.get_mut("fills").and_then(Value::as_array_mut).and_then(|v| v.first_mut()) {
             fill["color"] = encoded_color(&st.doc, &n.appearance.fill_paint())?;
         }
     }
@@ -319,7 +380,14 @@ fn prepare(s: &Session, p: &Value) -> Result<(Opciones, Vec<NodeId>, Value)> {
             .flatten()
             .ok_or_else(|| bad(APPLY, "El objeto seleccionado no es un trap con ajuste."))?;
         a.ancho_mm = number(pair, "widthMm", 0.1, 0.01, 2.0)?;
-        match choice(pair, "mode", "forward")? {
+        let mode = choice(pair, "mode", "forward")?;
+        if (a.izq.starts_with("GL") || a.der.starts_with("GL")) && !matches!(mode, "forward" | "none") {
+            return Err(bad(
+                APPLY,
+                "Sólido contra degradado conserva la dirección sólido hacia degradado. Puedes cambiar el ancho o excluir el par.",
+            ));
+        }
+        match mode {
             "forward" => a.rel = '>',
             "reverse" => {
                 std::mem::swap(&mut a.izq, &mut a.der);
@@ -351,7 +419,7 @@ fn analyze(s: &mut Session, p: &Value) -> Result<Value> {
     for encounter in report.get_mut("encounters").and_then(Value::as_array_mut).into_iter().flatten() {
         for field in ["left", "right"] {
             let key = encounter[field].as_str().unwrap_or_default();
-            let label = colors.get(key).map_or_else(|| key.to_string(), |c| display_label(c, key));
+            let label = source_label(&st.doc, &colors, key).unwrap_or_else(|| key.to_string());
             encounter[field] = json!(label);
         }
         for (field, label) in [("bottomId", "bottomName"), ("topId", "topName")] {
@@ -384,8 +452,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     let out_bytes = serde_json::to_vec(&value).map_err(|e| bad(APPLY, e.to_string()))?;
     let output = objects::decode(&out_bytes).map_err(|e| bad(APPLY, e.to_string()))?;
     let colors = selected_colors(s, &ids)?;
-    let label = |key: &str| colors.get(key).map_or_else(|| key.to_string(), |c| display_label(c, key));
-    let doc = &s.doc()?.doc;
+    let doc = s.doc()?.doc.clone();
+    let label = |key: &str| source_label(&doc, &colors, key).unwrap_or_else(|| key.to_string());
     let custom_names: BTreeMap<NodeId, String> = ids
         .iter()
         .filter_map(|id| {
@@ -437,7 +505,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "trapping.analyze", "Analyze Trapping Contacts", [], None,
-            "{ids?, widthMm?, direction?, black?, difference?, resetExisting?, pair?} → {ids, encounters, pairCount}; read-only shared Apply plan for opaque flat fills", has_doc, analyze),
+            "{ids?, widthMm?, direction?, black?, difference?, resetExisting?, pair?} → {ids, encounters, pairCount}; read-only shared Apply plan for opaque flat fills and solid into opaque process linear gradients", has_doc, analyze),
         cmd!(query "trapping.info", "Trapping Info", [], None,
             "{ids?} → {ids, artwork, pairs: [{id, name, left, right, relation, widthMm}]}; no geometry calculation", has_doc, query),
         cmd!(
@@ -445,7 +513,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Trapping",
             [],
             None,
-            "{ids?, widthMm?: 0.01..2, direction?: auto|reverse|center, black?: overprint|trap, difference?: 0..100, resetExisting?: bool, pair?: {id, widthMm, mode: forward|reverse|center|none|overprint}} CMYK and named spot geometry as one undo step; native trap fills preserve spot tints and overprint; images and technical inks are not supported",
+            "{ids?, widthMm?: 0.01..2, direction?: auto|reverse|center, black?: overprint|trap, difference?: 0..100, resetExisting?: bool, pair?: {id, widthMm, mode: forward|reverse|center|none|overprint}} CMYK and named spot geometry as one undo step; solid into opaque process linear gradient uses only solid ink at constant width, overriding global direction/black/difference; native fills preserve spots and overprint; images, gradient/gradient and technical inks are not supported",
             has_doc,
             apply
         ),

@@ -1,11 +1,11 @@
 # Project KX27: paleta de trapping
 
-Estado: análisis previo de encuentros y soporte inicial de spots vectoriales, 2026-10-24. No cambia la calificación alfa del editor.
+Estado: regla inicial sólido hacia degradado lineal opaco, análisis previo y spots sólidos, 2026-10-24. No cambia la calificación alfa del editor.
 
 ## Uso
 
 1. Abre **Window / Ventana → Trapping**. También está en el menú del panel Pathfinder: **Trap…**.
-2. Selecciona al menos dos trazados con rellenos planos distintos (proceso o muestras spot) y sin contorno.
+2. Selecciona trazados sin contorno: sólidos de proceso/spot o un sólido contra un degradado lineal opaco de proceso.
 3. Define ancho (mm), dirección, tratamiento del negro y diferencia mínima. **Analizar contactos** permite revisar los encuentros previstos sin modificar el documento; **Aplicar a la selección** crea o recalcula los traps.
 4. La paleta permanece abierta. En **Traps de la selección**, ajusta ancho y dirección de cada par y pulsa **Actualizar par**.
 5. Al recalcular, incluye el arte original y sus traps. **Restablecer pares** reemplaza los ajustes individuales con las reglas generales.
@@ -16,11 +16,21 @@ La paleta puede flotar o acoplarse como los demás paneles. Su ubicación se gua
 
 ## Revisar antes de aplicar
 
-**Análisis de contactos** muestra una fila por pareja de objetos fuente: nombres de los trazados, tintas, dirección, ancho y motivo (claridad, negro K, diferencia mínima o ajuste existente). Varios encuentros de las mismas tintas siguen compartiendo su regla y su trap; todavía no hay excepciones por borde ni edición local. Componentes separados entre los mismos dos objetos aparecen en una sola fila.
+**Análisis de contactos** muestra una fila por pareja de objetos fuente: nombres de los trazados, tintas, dirección, ancho y motivo (claridad, negro K, diferencia mínima o ajuste existente). Los encuentros sólido/sólido de las mismas tintas comparten regla y trap; los de degradado se asocian al objeto de degradado y al color sólido; todavía no hay excepciones por borde ni edición local. Componentes separados entre los mismos dos objetos aparecen en una sola fila.
 
 **Seleccionar pareja** selecciona los dos objetos fuente sin desplazar la vista. **Recuperar selección analizada** restaura el ámbito original; aplicar queda deshabilitado mientras se inspecciona una selección distinta. El informe persiste al cambiar la selección y se descarta al editar el documento, cambiar sus reglas, aplicar o cambiar de documento. Es temporal y no se guarda en preferencias ni en el archivo.
 
 El informe y Aplicar comparten un plan geométrico puro. Analizar calcula recortes y offsets temporales para prever las mismas zonas, pero no materializa objetos, cambia la selección ni crea pasos de deshacer. Cero encuentros es un resultado válido de análisis. El ámbito, ancho y tolerancias del algoritmo determinan los encuentros previstos: puede incluir separaciones pequeñas dentro del ancho; no es un detector universal de adyacencia ni un motor completo de visibilidad. Es el primer paso de revisión separada, no la implementación completa de las cuatro etapas profesionales.
+
+## Regla inicial: sólido hacia degradado
+
+En un encuentro entre un sólido y un degradado lineal opaco, el sólido se expande hacia el degradado con el ancho elegido durante toda la unión. El trap lleva solo la tinta del sólido, en sobreimpresión, sin degradado propio. Esta regla fija prevalece sobre dirección general (automática, invertida o centrada), diferencia mínima y tratamiento de negro. En el par puedes cambiar ancho o elegir **Sin trap**; no invertir, centrar ni sobreimprimir toda la superficie del negro.
+
+Los cuatro casos iniciales son amarillo hacia degradado cian, amarillo hacia degradado magenta, magenta hacia degradado cian y cian hacia degradado magenta. Se prueban con ambos órdenes de apilado. El motor usa la geometría visible y no toca las paradas, ubicación, porcentajes ni pintura de los originales. El blanco de proceso al 0 % se admite como parada opaca: no equivale a una parada transparente. No se detecta ni invierte la dirección por claridad local; tampoco se decide por un color promedio.
+
+**Analizar contactos** identifica la regla fija. Cada degradado utiliza una identidad interna por ID de objeto, mostrada como **Degradado · nombre del objeto**; no se muestran claves internas. El trap conserva su ID, ancho y exclusión al recalcular con el mismo arte. Duplicar el degradado crea otra identidad y requiere revisar sus ajustes. Guarda el archivo nativo para conservar las reglas; importar un PDF de producción no sustituye ese archivo.
+
+Admite entre 2 y 256 paradas ordenadas de proceso y plenamente opacas, con geometría válida. Un encuentro visible entre dos degradados se rechaza de forma atómica; varios degradados separados en la misma selección sí son posibles. Los degradados opacos también ocultan los encuentros que queden debajo. La regla no introduce rasterización. El RGB del SVG conserva la conversión simple existente; el PDF CMYK utiliza sus tintas de proceso. No se garantiza idéntica separación a partir de RGB y CMYK que solo se parezcan en pantalla.
 
 ## Arquitectura y procedencia
 
@@ -32,9 +42,9 @@ Es el mismo motor para escritorio y WebAssembly. No hace falta instalar el `.was
 
 ## Límites conservados y protecciones
 
-- Rellenos planos CMYK, RGB, gris, Lab y muestras globales o spot. RGB conserva la conversión simple del plugin; Lab de proceso pasa a CMYK con la configuración de color activa.
+- Rellenos sólidos CMYK, RGB, gris, Lab y muestras globales o spot. También sólido contra degradado lineal opaco de proceso. RGB conserva la conversión simple del plugin; Lab de proceso pasa a CMYK con la configuración de color activa.
 - Las muestras spot conservan nombre, vínculo y porcentaje. Su alternativo Lab/CMYK sirve para claridad y pantalla, nunca se suma como tinta CMYK. Dos spots distintos con el mismo alternativo siguen siendo dos planchas. Registro y nombres de colorante reservados por PDF (All, None, Cyan, Magenta, Yellow, Black) se rechazan. No se incluye una biblioteca de valores Pantone.
-- Rechaza contornos, transparencias, efectos y grupos con recorte o máscara en los objetos procesados. No calcula sobre texto, imágenes ni objetos vivos.
+- Rechaza contornos, transparencias, efectos y grupos con recorte o máscara en los objetos procesados. Los degradados radiales/libres, los vinculados a una muestra de degradado y los degradados con paradas spot se rechazan en esta etapa. No calcula sobre texto, imágenes ni objetos vivos.
 - Los traps llevan rellenos independientes en sobreimpresión: un CMYK de máximos por canal y un relleno por spot presente, con el máximo porcentaje de esa tinta. El exportador existente escribe spots como `Separation` y preserva `OP/op` y `OPM`; no se añade una pintura DeviceN al modelo. Exporta con sobreimpresión **Preserve**, sin convertir spots a proceso. View → Overprint Preview aproxima las mezclas en pantalla con Multiply; no es una prueba colorimétrica ni equivale a un RIP.
 - Las curvas se convierten a segmentos con el método y los límites de subdivisión del plugin 0.4. No es un offset Bézier exacto.
 - Máximo 80 trazados (incluidos traps) y 12.000 nodos de entrada por operación. El cálculo se realiza al pulsar un botón, no en cada frame.
@@ -63,7 +73,9 @@ cargo check --target wasm32-unknown-unknown -p vectorcraft-web
 cargo xtask ci
 ```
 
-Comprobado el 2026-10-24: 24 pruebas de geometría, 14 de motor y 5 de paleta aprobadas; capturas nativas en ambos temas, comprobación WASM, formato, assets, brands y layers aprobados. `cargo xtask ci` se detiene en avisos previos de Clippy en `render/src/fx.rs` e `pdf/src/import_scan.rs`; no representa una ejecución completa de todos los tests del workspace. La comprobación específica de UI también encuentra avisos previos fuera de esta paleta (Pathfinder y thumbnail worker).
+Comprobado el 2026-10-24: 26 pruebas de geometría, 18 de motor y 6 de paleta aprobadas; capturas nativas en ambos temas, comprobación WASM, formato, assets, brands y layers aprobados. `cargo xtask ci` se detiene en avisos previos de Clippy en `render/src/fx.rs` e `pdf/src/import_scan.rs`; no representa una ejecución completa de todos los tests del workspace. La comprobación específica de UI también encuentra avisos previos fuera de esta paleta (Pathfinder y thumbnail worker).
+
+Los archivos de ejemplo SVG y PDF del usuario se comprobaron localmente, sin incorporarlos al repositorio: cuatro encuentros por archivo y fuentes sin cambios. Las pruebas sintéticas de los cuatro casos cubren ambos apilados, ancho y tinta exactos, sobreimpresión, guardado, deshacer/rehacer, exclusión y entradas no admitidas. Las separaciones del PDF se inspeccionaron además con Ghostscript `tiffsep` a 600 dpi: la franja añade la tinta sólida al 100 % en tres alturas de cada encuentro, conservando las demás tintas dentro del redondeo de 8 bits observado (hasta 0,4 puntos porcentuales). Es una comprobación técnica local, no validación en máquina de impresión.
 
 Capturas opcionales del panel real (requieren un adaptador gráfico disponible):
 
@@ -71,7 +83,7 @@ Capturas opcionales del panel real (requieren un adaptador gráfico disponible):
 TRAPCOLOR_SCREENSHOTS=/tmp/trapcolor-panel cargo test -p vectorcraft-ui-egui --test trapping_panel trapping_panel_visual_capture
 ```
 
-Cubren un panel con análisis y traps en tema oscuro de 340 px y claro de 280 px.
+Cubren un panel con análisis y traps en tema oscuro de 340 px y claro de 280 px. Añade `KX27_GRADIENT_CAPTURE=1` para mostrar un par sólido/degradado.
 
 ## Compilación web y GitHub Pages
 

@@ -76,9 +76,20 @@ fn trapping_panel_visual_capture() {
     std::fs::create_dir_all(&dir).unwrap();
     for (theme, width) in [(vectorcraft_ui_egui::theme::Brightness::MediumDark, 340.0), (vectorcraft_ui_egui::theme::Brightness::Light, 280.0)] {
         let mut app = app();
+        if std::env::var("KX27_GRADIENT_CAPTURE").is_ok() {
+            let id = app.session.doc().unwrap().selection.objects[0].0;
+            app.run(
+                "paint.setFill",
+                json!({"ids":[id],"gradient":{"kind":"linear","stops":[
+                {"offset":0,"color":{"model":"cmyk","c":1,"m":0,"y":0,"k":0}},
+                {"offset":1,"color":{"model":"cmyk","c":0,"m":0,"y":0,"k":0}}]}}),
+            )
+            .unwrap();
+            app.run("select.all", json!({})).unwrap();
+        }
         app.run("trapping.apply", json!({})).unwrap();
         let mut ready = false;
-        let mut h = Harness::builder().with_size(egui::vec2(width, 850.0)).wgpu().build_ui_state(
+        let mut h = Harness::builder().with_size(egui::vec2(width, 1050.0)).wgpu().build_ui_state(
             move |ui, app: &mut VectorcraftApp| {
                 if !ready {
                     vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
@@ -174,4 +185,51 @@ fn analyze_preserves_art_and_invalidates_after_rule_or_document_changes() {
     h.state_mut().run("object.move", json!({"dx":1,"dy":0})).unwrap();
     h.run_steps(4);
     assert!(h.state().ui.trapping.message.contains("cambiaron"));
+}
+
+#[test]
+fn gradient_analysis_and_apply_show_fixed_rule_without_internal_keys() {
+    let mut app = app();
+    let ids = app.session.doc().unwrap().selection.objects.clone();
+    app.run(
+        "paint.setFill",
+        json!({"ids":[ids[0].0],"gradient":{"kind":"linear","stops":[
+        {"offset":0,"color":{"model":"cmyk","c":1,"m":0,"y":0,"k":0}},
+        {"offset":1,"color":{"model":"cmyk","c":0,"m":0,"y":0,"k":0}}]}}),
+    )
+    .unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.ui.trapping.direction = 2;
+    app.ui.trapping.difference = 100.0;
+    let before = app.session.doc().unwrap().doc.clone();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 1250.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Analizar contactos").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    assert!(std::sync::Arc::ptr_eq(&before, &h.state().session.doc().unwrap().doc));
+    h.get_by_label("Aplicar a la selección").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    let report = vectorcraft_engine::cmd::trapping::snapshot(&h.state().session).unwrap();
+    let p = &report["pairs"][0];
+    assert_eq!(p["solidIntoGradient"], true);
+    assert_eq!(p["relation"], ">");
+    assert!(p["right"].as_str().unwrap().contains("Degradado"));
+    assert!(!p["name"].as_str().unwrap().contains("GL"));
+    h.get_by_label("Actualizar par").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed);
 }

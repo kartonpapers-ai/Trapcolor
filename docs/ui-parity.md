@@ -1,5 +1,7 @@
 # UI and interaction parity
 
+> Project KX27 · 2026-10-24: opaque process linear gradients accept a solid-into-gradient trap at fixed width using only the solid ink in overprint. Sources stay unchanged; local inversion, gradient/gradient, radial/transparent/spot gradients and production validation remain out of scope. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).
+
 > Project KX27 · 2026-10-24: read-only contact analysis shares the Apply geometry plan, reports source pairs and rule reasons, and invalidates after document/rule changes. Per-edge overrides, images and production RIP validation remain pending. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).
 
 > Project KX27 · 2026-10-23: initial vector spot trapping preserves linked swatches/tints and overprint fills, with native per-object rule metadata and PDF export regressions. Images and technical inks remain unsupported; RIP validation is pending. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).

@@ -221,6 +221,8 @@ fn ink_fills(a: &Color, b: &Color) -> Vec<Value> {
 /// Un objeto de la selección que pinta un relleno.
 struct Objeto {
     id: u64,
+    // Set only by the native host after validating an opaque process linear gradient.
+    gradiente: bool,
     forma: Vec<Forma>,
     caja: [f64; 4],
     /// Si tiene curvas (sus polígonos quedan hasta `TOLERANCIA` por dentro de la curva real).
@@ -290,6 +292,7 @@ fn leer_objeto(o: &Value) -> Option<Objeto> {
     let fills: Vec<&Value> = o["fills"].as_array().into_iter().flatten().filter(|f| !f.is_null()).collect();
     let arriba = fills.last()?; // sin relleno no tapa nada ni lleva trap
     let color = (arriba["type"] == "solid").then(|| Color::leer(&arriba["color"])).flatten();
+    let gradiente = o["opaqueLinear"].as_bool() == Some(true);
     let regla = if o["fillRule"].as_str() == Some("evenodd") { FillRule::EvenOdd } else { FillRule::NonZero };
     let forma = poligonos(&o["path"]).simplify_shape(regla);
     let caja = caja_de(&forma);
@@ -299,7 +302,7 @@ fn leer_objeto(o: &Value) -> Option<Objeto> {
         .flatten()
         .flat_map(|s| s["anchors"].as_array().into_iter().flatten())
         .any(|a| a.get("in").is_some() || a.get("out").is_some());
-    (!forma.is_empty()).then_some(Objeto { id, forma, caja, curvo, color })
+    (!forma.is_empty()).then_some(Objeto { id, gradiente, forma, caja, curvo, color })
 }
 
 /// Ensancha (`d` > 0) o achica (`d` < 0) las formas.
@@ -484,6 +487,26 @@ pub fn atrapar(entrada: &Value, ancho: f64, modo: Modo) -> Value {
     atrapar_con(entrada, &Opciones::simples(ancho, modo))
 }
 
+// Opaque objects alone may occlude a contact. The native host rejects transparency first.
+fn zona_visible(objetos: &[Objeto], i: usize, j: usize, expande: Expande, w0: f64) -> Vec<Forma> {
+    let (Some(a), Some(b)) = (objetos.get(i), objetos.get(j)) else { return Vec::new() };
+    let mut visible = a.forma.clone();
+    for o in objetos.iter().take(j).skip(i + 1) {
+        if cerca(&a.caja, &o.caja, 0.0) {
+            visible = op(&visible, &o.forma, OverlayRule::Difference);
+        }
+    }
+    let w = if a.curvo || b.curvo { w0 + TOLERANCIA / 2.0 } else { w0 };
+    let mut z = zona(&visible, &b.forma, expande, w);
+    let bounds = caja_de(&z);
+    for o in objetos.iter().skip(j + 1) {
+        if cerca(&bounds, &o.caja, 0.0) {
+            z = op(&z, &o.forma, OverlayRule::Difference);
+        }
+    }
+    z
+}
+
 // Temporary geometry shared by analysis and materialization.
 struct Plan<'a> {
     arte: Vec<&'a Value>,
@@ -506,30 +529,47 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
         }
     }
     let objetos: Vec<Objeto> = arte.iter().filter_map(|o| leer_objeto(o)).collect();
-    if objetos.iter().filter(|o| o.color.is_some()).count() < 2 {
-        return Err("Selecciona al menos dos objetos con relleno plano que se toquen.".into());
+    if objetos.iter().filter(|o| o.color.is_some() || o.gradiente).count() < 2 {
+        return Err("Selecciona al menos dos objetos con rellenos compatibles que se toquen.".into());
     }
     let ancho_mm_def = ancho / PT_POR_MM;
     let mut pares: Vec<Par> = Vec::new();
     let mut encuentros = Vec::new();
     for j in 1..objetos.len() {
         let b = &objetos[j];
-        let Some(cb) = &b.color else { continue };
+        if b.color.is_none() && !b.gradiente {
+            continue;
+        }
         for i in 0..j {
             let a = &objetos[i];
-            let Some(ca) = &a.color else { continue };
-            let (la, lb) = (etiqueta(ca), etiqueta(cb));
+            if a.gradiente && b.gradiente {
+                if cerca(&a.caja, &b.caja, ancho) && area(&zona_visible(&objetos, i, j, Expande::Centro, ancho)) >= (ancho * ancho * 0.01).max(1e-4) {
+                    return Err("El encuentro entre dos degradados todavía no está admitido. Trabaja con sólido contra degradado lineal.".into());
+                }
+                continue;
+            }
+            let (Some(ca), Some(cb)) = (a.color.as_ref().or(b.color.as_ref()), b.color.as_ref().or(a.color.as_ref())) else { continue };
+            if a.color.is_none() && !a.gradiente {
+                continue;
+            }
+            let gradiente = a.gradiente || b.gradiente;
+            let la = if a.gradiente { format!("GL{}", a.id) } else { etiqueta(ca) };
+            let lb = if b.gradiente { format!("GL{}", b.id) } else { etiqueta(cb) };
             if la == lb {
                 continue;
             }
             // Ajuste del par: el escrito en un trap anterior, el ya decidido, o el de por defecto.
-            let ajuste = pares
+            let mut ajuste = pares
                 .iter()
                 .map(|p| &p.ajuste)
                 .chain(controles.iter().filter_map(|c| c.1.as_ref()))
                 .find(|aj| aj.es_del_par(&la, &lb))
                 .cloned()
                 .unwrap_or_else(|| {
+                    if gradiente {
+                        let (izq, der) = if a.gradiente { (&lb, &la) } else { (&la, &lb) };
+                        return Ajuste { izq: izq.clone(), der: der.clone(), rel: '>', ancho_mm: ancho_mm_def };
+                    }
                     let (claro, oscuro) = if cb.claridad() >= ca.claridad() { (&lb, &la) } else { (&la, &lb) };
                     let (izq, der) = if modo == Modo::Invertido { (oscuro, claro) } else { (claro, oscuro) };
                     let rel = if modo == Modo::Centrado { '=' } else { '>' };
@@ -542,12 +582,21 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
                     }
                     aj
                 });
+            if gradiente {
+                // Width and exclusion may be saved; direction is always solid into gradient.
+                let (solid, gradient) = if a.gradiente { (&lb, &la) } else { (&la, &lb) };
+                ajuste.izq = solid.clone();
+                ajuste.der = gradient.clone();
+                if ajuste.rel != '-' {
+                    ajuste.rel = '>';
+                }
+            }
             // "Sin trap" escrito a mano no tiene ancho: se marca el par con el del diálogo.
             let w0 = if ajuste.ancho_mm > 0.0 { ajuste.ancho_mm * PT_POR_MM } else { ancho };
             if !cerca(&a.caja, &b.caja, w0) {
                 continue;
             }
-            let (color, _) = color_trap(ca, cb);
+            let color = if gradiente { ca.clone() } else { color_trap(ca, cb).0 };
             let idx = match pares.iter().position(|p| p.ajuste.es_del_par(&la, &lb)) {
                 Some(k) => k,
                 None => {
@@ -555,36 +604,24 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
                     pares.len() - 1
                 }
             };
-            // Lo que se ve de A: sin los objetos que tiene encima, por debajo de B.
-            let mut a_vis = a.forma.clone();
-            for occluder in objetos.iter().take(j).skip(i + 1) {
-                if cerca(&a.caja, &occluder.caja, 0.0) {
-                    a_vis = op(&a_vis, &occluder.forma, OverlayRule::Difference);
-                }
-            }
             let expande = match ajuste.rel {
                 '=' => Expande::Centro,
                 // El negro arriba sobreimprime; abajo, el otro color crece sobre él.
                 'S' if ajuste.izq == lb => Expande::Sobre,
                 'S' => Expande::Arriba,
                 // Sin trap: la zona solo marca dónde está el par (el objeto va sin relleno).
+                '-' if gradiente && a.gradiente => Expande::Arriba,
+                '-' if gradiente => Expande::Abajo,
                 '-' if cb.claridad() >= ca.claridad() => Expande::Arriba,
                 '-' => Expande::Abajo,
                 _ if ajuste.izq == lb => Expande::Arriba,
                 _ => Expande::Abajo,
             };
-            // Con curvas, el polígono queda un poco por dentro: se compensa con media tolerancia.
-            let w = if a.curvo || b.curvo { w0 + TOLERANCIA / 2.0 } else { w0 };
-            let mut z = zona(&a_vis, &b.forma, expande, w);
-            // El trap va encima de toda la selección: se le quita lo que tapa a B.
-            let cz = caja_de(&z);
-            for occluder in objetos.iter().skip(j + 1) {
-                if cerca(&cz, &occluder.caja, 0.0) {
-                    z = op(&z, &occluder.forma, OverlayRule::Difference);
-                }
-            }
+            let z = zona_visible(&objetos, i, j, expande, w0);
             if area(&z) >= (w0 * w0 * 0.01).max(1e-4) {
-                let reason = if controles.iter().filter_map(|c| c.1.as_ref()).any(|aj| aj.es_del_par(&la, &lb)) {
+                let reason = if gradiente {
+                    "solidIntoGradient"
+                } else if controles.iter().filter_map(|c| c.1.as_ref()).any(|aj| aj.es_del_par(&la, &lb)) {
                     "savedRule"
                 } else if ajuste.rel == '-' {
                     "sharedInk"
@@ -687,6 +724,43 @@ mod tests {
             }
         }
         b
+    }
+
+    #[test]
+    fn solid_enters_gradient_with_its_own_ink_in_both_stack_orders() {
+        for above in [false, true] {
+            let mut gradient = cuadrado(1, 0.0, 0.0, 100.0, cmyk(0.0, 0.0, 0.0, 0.0));
+            gradient["opaqueLinear"] = json!(true);
+            gradient["fills"] = json!([{"type":"gradient"}]);
+            let solid = cuadrado(2, 80.0, 0.0, 100.0, cmyk(0.0, 0.0, 1.0, 0.0));
+            let input = json!({"nativeInks":true,"objects":if above {vec![solid,gradient]} else {vec![gradient,solid]}});
+            let opc = Opciones { modo: Modo::Centrado, diferencia_minima: 1.0, ..Opciones::simples(1.0, Modo::Auto) };
+            let report = analizar_con(&input, &opc);
+            assert_eq!(report["encounters"][0]["reason"], "solidIntoGradient");
+            assert_eq!(report["encounters"][0]["left"], "Y");
+            assert_eq!(report["encounters"][0]["right"], "GL1");
+            let output = atrapar_con(&input, &opc);
+            let trap = traps(&output).pop().unwrap();
+            let edge = if above { 100.0 } else { 80.0 };
+            let bounds = caja(&trap);
+            assert!((bounds[0] - (edge - 1.0)).abs() < 0.001, "{bounds:?}");
+            assert!((bounds[2] - edge).abs() < 0.001, "{bounds:?}");
+            assert_eq!(trap["nativeFills"], json!([{"type":"solid","color":cmyk(0.0,0.0,1.0,0.0)}]));
+        }
+    }
+
+    #[test]
+    fn gradients_do_not_silently_trap_each_other_and_occlusion_is_respected() {
+        let mut a = cuadrado(1, 0.0, 0.0, 100.0, cmyk(0.0, 0.0, 0.0, 0.0));
+        a["opaqueLinear"] = json!(true);
+        a["fills"] = json!([{"type":"gradient"}]);
+        let mut b = a.clone();
+        b["id"] = json!(2);
+        b["path"] = cuadrado(2, 80.0, 0.0, 100.0, cmyk(0.0, 0.0, 0.0, 0.0))["path"].clone();
+        let opc = Opciones::simples(1.0, Modo::Auto);
+        assert!(analizar_con(&json!({"objects":[a.clone(),b.clone()]}), &opc)["error"].as_str().unwrap().contains("dos degradados"));
+        let cover = cuadrado(3, -10.0, -10.0, 220.0, cmyk(0.0, 0.0, 1.0, 0.0));
+        assert_eq!(analizar_con(&json!({"objects":[a,b,cover]}), &opc)["encounters"], json!([]));
     }
 
     #[test]

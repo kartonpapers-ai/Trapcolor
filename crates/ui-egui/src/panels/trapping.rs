@@ -151,6 +151,9 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         });
         number(ui, "Diferencia mínima", &mut settings.difference, 0.0..=100.0, " %");
     });
+    if snapshot.as_ref().is_some_and(|v| v["gradients"].as_u64().unwrap_or(0) > 0) {
+        ui.label("Sólido + degradado lineal: dirección fija del sólido hacia el degradado, en sobreimpresión.");
+    }
     let stale = settings
         .analysis
         .as_ref()
@@ -220,7 +223,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.label(if doc_uid.is_none() {
             "Abre un documento para comenzar."
         } else {
-            "Selecciona dos trazados de colores distintos. Para recalcular, incluye también sus traps."
+            "Selecciona dos trazados compatibles. Para recalcular, incluye también sus traps."
         });
     } else {
         widgets::dim_label(ui, &format!("{artwork} trazados en la selección"));
@@ -269,6 +272,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                             encounter["topName"].as_str().unwrap_or("Trazado")
                         ));
                         let reason = match encounter["reason"].as_str() {
+                            Some("solidIntoGradient") => "Regla fija: sólido hacia degradado",
                             Some("savedRule") => "Ajuste del par existente",
                             Some("sharedInk") => "Diferencia de tinta inferior al mínimo",
                             Some("blackOverprint") => "Regla de sobreimpresión de negro K",
@@ -299,13 +303,18 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         let Some(id) = pair["id"].as_u64() else { continue };
         let name = pair["name"].as_str().unwrap_or("Trap");
         let key = ui.id().with(("trap-pair", doc_uid, id, name, pair["widthMm"].as_f64().unwrap_or_default().to_bits(), pair["relation"].as_str()));
+        let gradient = pair["solidIntoGradient"].as_bool().unwrap_or(false);
         let initial = PairEdit {
             width: pair["widthMm"].as_f64().filter(|v| *v >= 0.01).unwrap_or(settings.width_mm),
-            mode: match pair["relation"].as_str() {
-                Some("=") => 2,
-                Some("-") => 3,
-                Some("S") => 4,
-                _ => 0,
+            mode: if gradient {
+                usize::from(pair["relation"] == "-")
+            } else {
+                match pair["relation"].as_str() {
+                    Some("=") => 2,
+                    Some("-") => 3,
+                    Some("S") => 4,
+                    _ => 0,
+                }
             },
         };
         let mut edit = ui.ctx().data(|d| d.get_temp::<PairEdit>(key)).unwrap_or(initial);
@@ -315,7 +324,14 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         let forward = format!("{left} hacia {right}");
         let reverse = format!("{right} hacia {left}");
         let modes = [forward.as_str(), reverse.as_str(), "Centrado", "Sin trap", "Sobreimprimir negro K"];
-        let modes = if has_black { &modes[..] } else { &modes[..4] };
+        let gradient_modes = [forward.as_str(), "Sin trap"];
+        let modes = if gradient {
+            &gradient_modes[..]
+        } else if has_black {
+            &modes[..]
+        } else {
+            &modes[..4]
+        };
         edit.mode = edit.mode.min(modes.len().saturating_sub(1));
         ui.push_id(id, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -340,7 +356,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                 if ui.button("Actualizar par").clicked() {
                     let mut p = settings.params();
                     p["ids"] = ids.clone();
-                    let mode = ["forward", "reverse", "center", "none", "overprint"].get(edit.mode).copied().unwrap_or("forward");
+                    let modes = if gradient { &["forward", "none"][..] } else { &["forward", "reverse", "center", "none", "overprint"][..] };
+                    let mode = modes.get(edit.mode).copied().unwrap_or("forward");
                     p["pair"] = json!({"id": id, "widthMm": edit.width, "mode": mode});
                     apply(app, &mut settings, p);
                 }
@@ -350,8 +367,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         widgets::divider(ui);
     }
     ui.collapsing("Alcance de esta versión", |ui| {
-        ui.label("CMYK y muestras spot planas con sus porcentajes, sin contornos ni transparencias. RGB usa conversión simple a CMYK.");
-        ui.label("Los traps conservan las tintas y sobreimprimen. Para ver la aproximación en pantalla, activa View → Overprint Preview. No admite imágenes ni tintas técnicas.");
+        ui.label("Sólidos CMYK y spot; también sólido contra degradado lineal opaco de proceso. RGB usa conversión simple a CMYK.");
+        ui.label("Los traps conservan las tintas y sobreimprimen. Para ver la aproximación en pantalla, activa View → Overprint Preview. No admite imágenes, degradados radiales, encuentros entre degradados, tintas técnicas ni transparencias.");
         ui.label("Los traps existentes conservan sus ajustes. Selecciona todo el arte que pueda tapar un encuentro. Máximo: 80 trazados y 12.000 nodos por operación.");
     });
     app.ui.trapping = settings;
