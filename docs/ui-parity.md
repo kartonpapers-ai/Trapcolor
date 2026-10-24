@@ -1,5 +1,7 @@
 # UI and interaction parity
 
+> Project KX27 · 2026-10-24: read-only contact analysis shares the Apply geometry plan, reports source pairs and rule reasons, and invalidates after document/rule changes. Per-edge overrides, images and production RIP validation remain pending. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).
+
 > Project KX27 · 2026-10-23: initial vector spot trapping preserves linked swatches/tints and overprint fills, with native per-object rule metadata and PDF export regressions. Images and technical inks remain unsupported; RIP validation is pending. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).
 
 > Trap Color fork update · 2026-10-23: persistent Trapping panel with steppa-trap 0.4 geometry, per-pair controls and transactional undo. See trapcolor-trapping.md for scope and remaining limits. Upstream parity scores and estimates are unchanged.

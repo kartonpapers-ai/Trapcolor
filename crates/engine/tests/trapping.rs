@@ -126,6 +126,9 @@ fn spot_process_trap_preserves_link_tint_undo_save_and_pdf_separation() {
     let id = s.doc().unwrap().selection.objects[0].0;
     let name = "KX Ink 186 C";
     spot_fill(&mut s, id, name, 40.0);
+    let analysis = run(&mut s, "trapping.analyze", json!({"difference":0}));
+    let contact = &analysis["encounters"][0];
+    assert!(contact["left"].as_str().unwrap().contains(name) || contact["right"].as_str().unwrap().contains(name));
     let before = s.doc().unwrap().doc.clone();
     let r = run(&mut s, "trapping.apply", json!({"difference":0}));
     let trap = NodeId(r["pairs"][0]["id"].as_u64().unwrap());
@@ -242,4 +245,41 @@ fn copied_traps_keep_their_rules_with_new_object_ids() {
     assert_eq!(r["pairs"][0]["id"], new);
     assert_eq!(r["pairs"][0]["relation"], "=");
     assert_eq!(r["pairs"][0]["widthMm"], 0.3);
+}
+
+#[test]
+fn contact_analysis_is_a_query_and_matches_apply() {
+    let mut s = setup();
+    let doc = s.doc().unwrap().doc.clone();
+    let selection = s.doc().unwrap().selection.clone();
+    let history = (s.doc().unwrap().history.undo.len(), s.doc().unwrap().history.redo.len());
+    let dirty = s.doc().unwrap().is_dirty();
+    let report = run(&mut s, "trapping.analyze", json!({"widthMm":0.2}));
+    assert_eq!(report["encounters"].as_array().unwrap().len(), 1);
+    assert!(report["encounters"][0]["bottomName"].is_string());
+    assert!(std::sync::Arc::ptr_eq(&doc, &s.doc().unwrap().doc));
+    assert_eq!(s.doc().unwrap().selection, selection);
+    assert_eq!(s.doc().unwrap().is_dirty(), dirty);
+    assert_eq!((s.doc().unwrap().history.undo.len(), s.doc().unwrap().history.redo.len()), history);
+    let applied = run(&mut s, "trapping.apply", json!({"widthMm":0.2}));
+    assert_eq!(report["pairCount"], applied["pairs"].as_array().unwrap().len());
+    assert_eq!(report["encounters"][0]["relation"], applied["pairs"][0]["relation"]);
+    let saved = run(&mut s, "trapping.analyze", json!({}));
+    assert_eq!(saved["encounters"][0]["reason"], "savedRule");
+}
+
+#[test]
+fn contact_analysis_empty_and_unsupported_are_atomic() {
+    let mut s = setup();
+    let ids = s.doc().unwrap().selection.objects.clone();
+    run(&mut s, "select.set", json!({"ids":[ids[1].0]}));
+    run(&mut s, "object.move", json!({"dx":500,"dy":0}));
+    run(&mut s, "select.all", json!({}));
+    let doc = s.doc().unwrap().doc.clone();
+    assert_eq!(run(&mut s, "trapping.analyze", json!({}))["encounters"], json!([]));
+    assert!(std::sync::Arc::ptr_eq(&doc, &s.doc().unwrap().doc));
+    run(&mut s, "transparency.set", json!({"opacity":50}));
+    let doc = s.doc().unwrap().doc.clone();
+    assert!(s.execute("trapping.analyze", &json!({})).is_err());
+    assert!(std::sync::Arc::ptr_eq(&doc, &s.doc().unwrap().doc));
 }

@@ -78,7 +78,7 @@ fn trapping_panel_visual_capture() {
         let mut app = app();
         app.run("trapping.apply", json!({})).unwrap();
         let mut ready = false;
-        let mut h = Harness::builder().with_size(egui::vec2(width, 520.0)).wgpu().build_ui_state(
+        let mut h = Harness::builder().with_size(egui::vec2(width, 850.0)).wgpu().build_ui_state(
             move |ui, app: &mut VectorcraftApp| {
                 if !ready {
                     vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
@@ -91,6 +91,8 @@ fn trapping_panel_visual_capture() {
             },
             app,
         );
+        h.run_steps(4);
+        h.get_by_label("Analizar contactos").click();
         h.run_steps(4);
         h.render().unwrap().save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
     }
@@ -126,4 +128,50 @@ fn spot_names_remain_readable_with_only_the_trap_selected() {
     h.get_by_label(&label);
     h.get_by_label("Localizar");
     assert!(!h.state().ui.trapping.failed);
+}
+
+#[test]
+fn analyze_preserves_art_and_invalidates_after_rule_or_document_changes() {
+    let mut app = app();
+    app.run("shape.rectangle", json!({"x":160,"y":120,"width":10,"height":10})).unwrap();
+    app.run("paint.setFill", json!({"color":"#ff00ff"})).unwrap();
+    app.run("paint.setStroke", json!({"none":true})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    let doc = app.session.doc().unwrap().doc.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 1100.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Analizar contactos").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    assert!(std::sync::Arc::ptr_eq(&doc, &h.state().session.doc().unwrap().doc));
+    assert_eq!(undo, h.state().session.doc().unwrap().history.undo.len());
+    h.get_by_label("Seleccionar pareja").click();
+    h.run_steps(4);
+    h.get_by_label("Análisis de contactos");
+    h.get_by_label("Recuperar selección analizada").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.doc().unwrap().selection.objects.len(), 3);
+    let serialized = serde_json::to_value(&h.state().ui.trapping).unwrap();
+    assert!(serialized.get("analysis").is_none());
+    h.state_mut().ui.trapping.width_mm = 0.3;
+    h.run_steps(4);
+    assert!(h.state().ui.trapping.message.contains("cambiaron"));
+    h.get_by_label("Analizar contactos").click();
+    h.run_steps(4);
+    h.state_mut().run("object.move", json!({"dx":1,"dy":0})).unwrap();
+    h.run_steps(4);
+    assert!(h.state().ui.trapping.message.contains("cambiaron"));
 }

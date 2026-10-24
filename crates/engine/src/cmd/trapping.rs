@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use vectorcraft_color::{BlendMode, Color, Paint};
 use vectorcraft_doc::{Appearance, AppearanceItem, Document, FillLayer, Node, NodeKind};
 use vectorcraft_plugins::objects;
-use vectorcraft_trapping::{Modo, Opciones, PT_POR_MM, atrapar_con, leer_ajuste};
+use vectorcraft_trapping::{Modo, Opciones, PT_POR_MM, analizar_con, atrapar_con, leer_ajuste};
 
 use super::*;
 
@@ -255,7 +255,7 @@ fn validate(s: &Session, ids: &[NodeId]) -> Result<()> {
     Ok(())
 }
 
-fn apply(s: &mut Session, p: &Value) -> Result<Value> {
+fn prepare(s: &Session, p: &Value) -> Result<(Opciones, Vec<NodeId>, Value)> {
     let opc = options(p)?;
     let ids = targets(s, p)?;
     let st = s.doc()?;
@@ -279,7 +279,6 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     }
     validate(s, &ids)?;
     let st = s.doc()?;
-    let parent = st.insertion_parent();
     let blacks = black_labels(s, &ids)?;
     let bytes = objects::encode_input(&st.doc, &ids);
     let mut input: Value = serde_json::from_slice(&bytes).map_err(|e| bad(APPLY, e.to_string()))?;
@@ -338,6 +337,37 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         }
         o["name"] = json!(a.nombre());
     }
+    Ok((opc, ids, input))
+}
+
+fn analyze(s: &mut Session, p: &Value) -> Result<Value> {
+    let (opc, ids, input) = prepare(s, p)?;
+    let mut report = analizar_con(&input, &opc);
+    if let Some(e) = report.get("error").and_then(Value::as_str) {
+        return Err(bad("trapping.analyze", e));
+    }
+    let colors = selected_colors(s, &ids)?;
+    let st = s.doc()?;
+    for encounter in report.get_mut("encounters").and_then(Value::as_array_mut).into_iter().flatten() {
+        for field in ["left", "right"] {
+            let key = encounter[field].as_str().unwrap_or_default();
+            let label = colors.get(key).map_or_else(|| key.to_string(), |c| display_label(c, key));
+            encounter[field] = json!(label);
+        }
+        for (field, label) in [("bottomId", "bottomName"), ("topId", "topName")] {
+            if let Some(n) = encounter[field].as_u64().and_then(|id| st.doc.node(NodeId(id))) {
+                encounter[label] = json!(n.display_name());
+            }
+        }
+    }
+    let selected = ids_param(p, "ids").unwrap_or_else(|| st.selection.objects.clone());
+    report["ids"] = json!(selected.iter().map(|id| id.0).collect::<Vec<_>>());
+    Ok(report)
+}
+
+fn apply(s: &mut Session, p: &Value) -> Result<Value> {
+    let (opc, ids, input) = prepare(s, p)?;
+    let parent = s.doc()?.insertion_parent();
     let value = atrapar_con(&input, &opc);
     if let Some(error) = value.get("error").and_then(Value::as_str) {
         return Err(bad(APPLY, error));
@@ -406,6 +436,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "trapping.analyze", "Analyze Trapping Contacts", [], None,
+            "{ids?, widthMm?, direction?, black?, difference?, resetExisting?, pair?} → {ids, encounters, pairCount}; read-only shared Apply plan for opaque flat fills", has_doc, analyze),
         cmd!(query "trapping.info", "Trapping Info", [], None,
             "{ids?} → {ids, artwork, pairs: [{id, name, left, right, relation, widthMm}]}; no geometry calculation", has_doc, query),
         cmd!(

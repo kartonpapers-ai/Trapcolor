@@ -220,6 +220,7 @@ fn ink_fills(a: &Color, b: &Color) -> Vec<Value> {
 
 /// Un objeto de la selección que pinta un relleno.
 struct Objeto {
+    id: u64,
     forma: Vec<Forma>,
     caja: [f64; 4],
     /// Si tiene curvas (sus polígonos quedan hasta `TOLERANCIA` por dentro de la curva real).
@@ -285,7 +286,7 @@ fn cerca(a: &[f64; 4], b: &[f64; 4], margen: f64) -> bool {
 }
 
 fn leer_objeto(o: &Value) -> Option<Objeto> {
-    o.get("id")?.as_u64()?;
+    let id = o.get("id")?.as_u64()?;
     let fills: Vec<&Value> = o["fills"].as_array().into_iter().flatten().filter(|f| !f.is_null()).collect();
     let arriba = fills.last()?; // sin relleno no tapa nada ni lleva trap
     let color = (arriba["type"] == "solid").then(|| Color::leer(&arriba["color"])).flatten();
@@ -298,7 +299,7 @@ fn leer_objeto(o: &Value) -> Option<Objeto> {
         .flatten()
         .flat_map(|s| s["anchors"].as_array().into_iter().flatten())
         .any(|a| a.get("in").is_some() || a.get("out").is_some());
-    (!forma.is_empty()).then_some(Objeto { forma, caja, curvo, color })
+    (!forma.is_empty()).then_some(Objeto { id, forma, caja, curvo, color })
 }
 
 /// Ensancha (`d` > 0) o achica (`d` < 0) las formas.
@@ -483,10 +484,15 @@ pub fn atrapar(entrada: &Value, ancho: f64, modo: Modo) -> Value {
     atrapar_con(entrada, &Opciones::simples(ancho, modo))
 }
 
-/// [`atrapar`] con las reglas del diálogo: negro que sobreimprime y diferencia mínima de tinta.
-/// Un par que queda sin trap por una regla igual aparece (`trap X-Y no`, sin relleno), para
-/// poder forzarlo renombrándolo.
-pub fn atrapar_con(entrada: &Value, opc: &Opciones) -> Value {
+// Temporary geometry shared by analysis and materialization.
+struct Plan<'a> {
+    arte: Vec<&'a Value>,
+    controles: Vec<(Value, Option<Ajuste>)>,
+    pares: Vec<Par>,
+    encuentros: Vec<Value>,
+}
+
+fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
     let (ancho, modo) = (opc.ancho, opc.modo);
     let originales: Vec<&Value> = entrada["objects"].as_array().into_iter().flatten().collect();
     // Separar los traps anteriores (controles) del arte.
@@ -495,16 +501,17 @@ pub fn atrapar_con(entrada: &Value, opc: &Opciones) -> Value {
     for o in &originales {
         match o["name"].as_str().and_then(leer_ajuste) {
             Some(Ok(a)) => controles.push((o["id"].clone(), a)),
-            Some(Err(e)) => return json!({"error": e}),
+            Some(Err(e)) => return Err(e),
             None => arte.push(o),
         }
     }
     let objetos: Vec<Objeto> = arte.iter().filter_map(|o| leer_objeto(o)).collect();
     if objetos.iter().filter(|o| o.color.is_some()).count() < 2 {
-        return json!({"error": "Selecciona al menos dos objetos con relleno plano que se toquen."});
+        return Err("Selecciona al menos dos objetos con relleno plano que se toquen.".into());
     }
     let ancho_mm_def = ancho / PT_POR_MM;
     let mut pares: Vec<Par> = Vec::new();
+    let mut encuentros = Vec::new();
     for j in 1..objetos.len() {
         let b = &objetos[j];
         let Some(cb) = &b.color else { continue };
@@ -577,12 +584,47 @@ pub fn atrapar_con(entrada: &Value, opc: &Opciones) -> Value {
                 }
             }
             if area(&z) >= (w0 * w0 * 0.01).max(1e-4) {
+                let reason = if controles.iter().filter_map(|c| c.1.as_ref()).any(|aj| aj.es_del_par(&la, &lb)) {
+                    "savedRule"
+                } else if ajuste.rel == '-' {
+                    "sharedInk"
+                } else if ajuste.rel == 'S' {
+                    "blackOverprint"
+                } else if modo == Modo::Centrado {
+                    "center"
+                } else if modo == Modo::Invertido {
+                    "reverse"
+                } else {
+                    "lighterToDarker"
+                };
+                encuentros.push(json!({"bottomId": a.id, "topId": b.id,
+                    "left": ajuste.izq, "right": ajuste.der, "relation": ajuste.rel.to_string(),
+                    "widthMm": w0 / PT_POR_MM, "reason": reason, "bounds": caja_de(&z)}));
                 pares[idx].zonas.extend(z);
             }
         }
     }
     // Un par sin contacto real no lleva trap.
     pares.retain(|p| !p.zonas.is_empty());
+    Ok(Plan { arte, controles, pares, encuentros })
+}
+
+/// Read-only candidate report. Uses the same temporary clipping/offset plan as Apply;
+/// it never materializes document objects. One record per source object pair.
+pub fn analizar_con(entrada: &Value, opc: &Opciones) -> Value {
+    match plan(entrada, opc) {
+        Ok(p) => json!({"encounters": p.encuentros, "pairCount": p.pares.len()}),
+        Err(e) => json!({"error": e}),
+    }
+}
+
+/// [`atrapar`] with black overprint and minimum ink difference rules.
+/// Materialize the shared plan, preserving the original plug-in output contract.
+pub fn atrapar_con(entrada: &Value, opc: &Opciones) -> Value {
+    let Plan { arte, controles, pares, .. } = match plan(entrada, opc) {
+        Ok(p) => p,
+        Err(e) => return json!({"error": e}),
+    };
     if pares.is_empty() {
         return json!({"error": "No hay colores distintos que se toquen en la selección."});
     }
@@ -645,6 +687,39 @@ mod tests {
             }
         }
         b
+    }
+
+    #[test]
+    fn analysis_is_read_only_and_reports_each_source_pair() {
+        let input = json!({"objects": [
+            cuadrado(1, 0.0, 0.0, 100.0, cmyk(1.0,0.0,0.0,0.0)),
+            cuadrado(2, 20.0, 20.0, 10.0, cmyk(0.0,0.0,1.0,0.0)),
+            cuadrado(3, 60.0, 60.0, 10.0, cmyk(0.0,0.0,1.0,0.0))]});
+        let before = input.clone();
+        let options = Opciones::simples(1.0, Modo::Auto);
+        let report = analizar_con(&input, &options);
+        assert_eq!(report["encounters"].as_array().unwrap().len(), 2);
+        assert_eq!(report["encounters"][0]["bottomId"], 1);
+        assert_eq!(report["encounters"][0]["topId"], 2);
+        assert_eq!(report["encounters"][1]["topId"], 3);
+        assert_eq!(report["pairCount"], traps(&atrapar_con(&input, &options)).len());
+        assert_eq!(input, before);
+        assert!(report.get("objects").is_none());
+    }
+
+    #[test]
+    fn analysis_empty_is_successful_and_saved_rules_are_explained() {
+        let mut input = json!({"objects": [
+            cuadrado(1, 0.0, 0.0, 20.0, cmyk(1.0,0.0,0.0,0.0)),
+            cuadrado(2, 100.0, 100.0, 20.0, cmyk(0.0,0.0,1.0,0.0))]});
+        let options = Opciones::simples(1.0, Modo::Auto);
+        assert_eq!(analizar_con(&input, &options)["encounters"], json!([]));
+        input["objects"][1] = cuadrado(2, 5.0, 5.0, 10.0, cmyk(0.0, 0.0, 1.0, 0.0));
+        input["objects"].as_array_mut().unwrap().push(json!({"id":3,"name":"trap C=Y 0.2"}));
+        let report = analizar_con(&input, &options);
+        assert_eq!(report["encounters"][0]["reason"], "savedRule");
+        assert_eq!(report["encounters"][0]["relation"], "=");
+        assert_eq!(report["encounters"][0]["widthMm"], 0.2);
     }
 
     #[test]

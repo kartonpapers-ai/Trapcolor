@@ -1,9 +1,11 @@
 //! Persistent Trap Color palette. No modal and no dependency on an installed WASM plug-in.
-//! Geometry is only calculated on Apply; ordinary frames read a selection snapshot.
+//! Geometry is calculated only on Analyze or Apply; ordinary frames read a snapshot.
 
 use egui::Ui;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
+use vectorcraft_doc::Document;
 
 use crate::theme::Tokens;
 use crate::{VectorcraftApp, widgets};
@@ -12,6 +14,13 @@ pub const ID: &str = "trapping";
 const DIRECTIONS: [&str; 3] = ["Claro hacia oscuro", "Invertida", "Centrada"];
 const DIRECTION_IDS: [&str; 3] = ["auto", "reverse", "center"];
 const BLACK: [&str; 2] = ["Sobreimprimir negro", "Aplicar trapping"];
+
+#[derive(Debug)]
+struct Analysis {
+    document: Arc<Document>,
+    params: Value,
+    report: Value,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -26,11 +35,25 @@ pub struct Settings {
     pub failed: bool,
     #[serde(skip)]
     document: Option<u64>,
+    #[serde(skip)]
+    analysis: Option<Arc<Analysis>>,
+    #[serde(skip)]
+    analysis_page: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { width_mm: 0.1, direction: 0, black: 0, difference: 10.0, message: String::new(), failed: false, document: None }
+        Self {
+            width_mm: 0.1,
+            direction: 0,
+            black: 0,
+            difference: 10.0,
+            message: String::new(),
+            failed: false,
+            document: None,
+            analysis: None,
+            analysis_page: 0,
+        }
     }
 }
 
@@ -72,6 +95,7 @@ fn number(ui: &mut Ui, label: &str, value: &mut f64, range: std::ops::RangeInclu
 }
 
 fn apply(app: &mut VectorcraftApp, settings: &mut Settings, params: Value) {
+    settings.analysis = None;
     match app.run("trapping.apply", params) {
         Ok(v) => {
             let count = v.get("pairs").and_then(Value::as_array).map_or(0, Vec::len);
@@ -91,6 +115,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     settings.sanitize();
     let doc_uid = app.session.active().map(|st| st.uid);
     if settings.document != doc_uid {
+        settings.analysis = None;
         settings.message.clear();
         settings.failed = false;
         settings.document = doc_uid;
@@ -126,8 +151,49 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         });
         number(ui, "Diferencia mínima", &mut settings.difference, 0.0..=100.0, " %");
     });
+    let stale = settings
+        .analysis
+        .as_ref()
+        .is_some_and(|a| a.params != settings.params() || app.session.active().is_none_or(|st| !Arc::ptr_eq(&a.document, &st.doc)));
+    if stale {
+        settings.analysis = None;
+        settings.message = "El documento o las reglas cambiaron. Analiza de nuevo.".into();
+        settings.failed = false;
+    }
     ui.add_space(8.0);
-    ui.add_enabled_ui(can_apply, |ui| {
+    if ui.add_enabled(can_apply, egui::Button::new("Analizar contactos").min_size(egui::vec2(ui.available_width(), 28.0))).clicked() {
+        let params = settings.params();
+        let mut p = params.clone();
+        p["ids"] = ids.clone();
+        settings.analysis = None;
+        match app.run("trapping.analyze", p) {
+            Ok(report) => {
+                if let Some(st) = app.session.active() {
+                    settings.analysis = Some(Arc::new(Analysis { document: st.doc.clone(), params, report }));
+                    settings.analysis_page = 0;
+                    settings.message = "Análisis listo. El documento no se modificó.".into();
+                    settings.failed = false;
+                }
+            }
+            Err(e) => {
+                settings.message = e;
+                settings.failed = true;
+            }
+        }
+    }
+    let reviewed_scope = settings.analysis.as_ref().is_none_or(|a| a.report["ids"] == ids);
+    let has_contacts = settings.analysis.as_ref().is_none_or(|a| a.report["encounters"].as_array().is_some_and(|v| !v.is_empty()));
+    if !reviewed_scope {
+        ui.label("Recupera la selección analizada para aplicar sus reglas.");
+        if ui.button("Recuperar selección analizada").clicked()
+            && let Some(a) = &settings.analysis
+            && let Err(e) = app.run("select.set", json!({"ids": a.report["ids"]}))
+        {
+            settings.message = e;
+            settings.failed = true;
+        }
+    }
+    ui.add_enabled_ui(can_apply && reviewed_scope && has_contacts, |ui| {
         if ui
             .add_sized(
                 [ui.available_width(), 28.0],
@@ -164,9 +230,70 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.label(egui::RichText::new(&settings.message).color(color));
     }
     widgets::divider(ui);
-    widgets::section_header(ui, "Pares de la selección");
+    if let Some(a) = settings.analysis.clone() {
+        widgets::section_header(ui, "Análisis de contactos");
+        let encounters = a.report["encounters"].as_array().map(Vec::as_slice).unwrap_or_default();
+        ui.label(if encounters.len() == 1 { "1 encuentro previsto".into() } else { format!("{} encuentros previstos", encounters.len()) });
+        if encounters.is_empty() {
+            ui.label("No se prevén encuentros con este ancho y selección.");
+        } else {
+            let pages = encounters.len().div_ceil(20);
+            settings.analysis_page = settings.analysis_page.min(pages.saturating_sub(1));
+            if pages > 1 {
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(settings.analysis_page > 0, egui::Button::new("Anterior")).clicked() {
+                        settings.analysis_page = settings.analysis_page.saturating_sub(1);
+                    }
+                    ui.label(format!("{} / {pages}", settings.analysis_page + 1));
+                    if ui.add_enabled(settings.analysis_page + 1 < pages, egui::Button::new("Siguiente")).clicked() {
+                        settings.analysis_page += 1;
+                    }
+                });
+            }
+            egui::ScrollArea::vertical().id_salt("trap-analysis").max_height(230.0).show(ui, |ui| {
+                for (index, encounter) in encounters.iter().enumerate().skip(settings.analysis_page * 20).take(20) {
+                    ui.push_id(("encounter", index), |ui| {
+                        let left = encounter["left"].as_str().unwrap_or_default();
+                        let right = encounter["right"].as_str().unwrap_or_default();
+                        let relation = encounter["relation"].as_str().unwrap_or_default();
+                        let action = match relation {
+                            "-" => "Sin trap".into(),
+                            "=" => format!("Centrado: {left} / {right}"),
+                            "S" => format!("Sobreimprimir: {left} sobre {right}"),
+                            _ => format!("{left} hacia {right}"),
+                        };
+                        ui.strong(action);
+                        ui.label(format!(
+                            "{} / {}",
+                            encounter["bottomName"].as_str().unwrap_or("Trazado"),
+                            encounter["topName"].as_str().unwrap_or("Trazado")
+                        ));
+                        let reason = match encounter["reason"].as_str() {
+                            Some("savedRule") => "Ajuste del par existente",
+                            Some("sharedInk") => "Diferencia de tinta inferior al mínimo",
+                            Some("blackOverprint") => "Regla de sobreimpresión de negro K",
+                            Some("center") => "Dirección centrada",
+                            Some("reverse") => "Dirección invertida",
+                            _ => "Color claro hacia oscuro",
+                        };
+                        ui.label(format!("{:.2} mm · {reason}", encounter["widthMm"].as_f64().unwrap_or_default()));
+                        if ui.button("Seleccionar pareja").clicked()
+                            && let Err(e) = app.run("select.set", json!({"ids": [encounter["bottomId"], encounter["topId"]]}))
+                        {
+                            settings.message = e;
+                            settings.failed = true;
+                        }
+                        widgets::divider(ui);
+                    });
+                }
+            });
+        }
+        widgets::dim_label(ui, "Previsión según el ancho, las reglas y el arte seleccionado. Los ajustes se comparten por pareja de tintas.");
+        widgets::divider(ui);
+    }
+    widgets::section_header(ui, "Traps de la selección");
     if pairs.is_empty() {
-        ui.label("Aplica trapping para ver los pares y ajustar cada encuentro.");
+        ui.label("Aplica trapping para ver y ajustar las parejas de tintas.");
     }
     for pair in &pairs {
         let Some(id) = pair["id"].as_u64() else { continue };
@@ -197,11 +324,10 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                     .button("Localizar")
                     .on_hover_text("Selecciona el trap en el lienzo. Vuelve a seleccionar el arte y sus traps para recalcular.")
                     .clicked()
+                    && let Err(e) = app.run("select.set", json!({"ids": [id]}))
                 {
-                    if let Err(e) = app.run("select.set", json!({"ids": [id]})) {
-                        settings.message = e;
-                        settings.failed = true;
-                    }
+                    settings.message = e;
+                    settings.failed = true;
                 }
             });
             number(ui, "Ancho del par", &mut edit.width, 0.01..=2.0, " mm");
