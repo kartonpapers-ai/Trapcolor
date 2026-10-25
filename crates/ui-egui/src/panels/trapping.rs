@@ -154,6 +154,9 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     if snapshot.as_ref().is_some_and(|v| v["gradients"].as_u64().unwrap_or(0) > 0) {
         ui.label("Sólido + degradado lineal: dirección fija del sólido hacia el degradado, en sobreimpresión.");
     }
+    if snapshot.as_ref().is_some_and(|v| v["images"].as_u64().unwrap_or(0) > 0) {
+        ui.label("Sólido + imagen opaca: sólido hacia el marco de la imagen, sin analizar los colores de sus píxeles.");
+    }
     let stale = settings
         .analysis
         .as_ref()
@@ -226,7 +229,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             "Selecciona dos trazados compatibles. Para recalcular, incluye también sus traps."
         });
     } else {
-        widgets::dim_label(ui, &format!("{artwork} trazados en la selección"));
+        widgets::dim_label(ui, &format!("{artwork} objetos en la selección"));
     }
     if !settings.message.is_empty() {
         let color = if settings.failed { tokens.error } else { tokens.text };
@@ -272,6 +275,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                             encounter["topName"].as_str().unwrap_or("Trazado")
                         ));
                         let reason = match encounter["reason"].as_str() {
+                            Some("solidIntoImage") => "Regla fija: sólido hacia imagen opaca",
                             Some("solidIntoGradient") => "Regla fija: sólido hacia degradado",
                             Some("savedRule") => "Ajuste del par existente",
                             Some("sharedInk") => "Diferencia de tinta inferior al mínimo",
@@ -292,7 +296,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                 }
             });
         }
-        widgets::dim_label(ui, "Previsión según el ancho, las reglas y el arte seleccionado. Los ajustes se comparten por pareja de tintas.");
+        widgets::dim_label(ui, "Previsión según el ancho, las reglas y el arte seleccionado. Cada ajuste afecta a los encuentros del par mostrado.");
         widgets::divider(ui);
     }
     widgets::section_header(ui, "Traps de la selección");
@@ -303,7 +307,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         let Some(id) = pair["id"].as_u64() else { continue };
         let name = pair["name"].as_str().unwrap_or("Trap");
         let key = ui.id().with(("trap-pair", doc_uid, id, name, pair["widthMm"].as_f64().unwrap_or_default().to_bits(), pair["relation"].as_str()));
-        let gradient = pair["solidIntoGradient"].as_bool().unwrap_or(false);
+        let gradient = pair["solidIntoGradient"].as_bool().unwrap_or(false) || pair["solidIntoImage"].as_bool().unwrap_or(false);
         let initial = PairEdit {
             width: pair["widthMm"].as_f64().filter(|v| *v >= 0.01).unwrap_or(settings.width_mm),
             mode: if gradient {
@@ -368,8 +372,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     }
     ui.collapsing("Alcance de esta versión", |ui| {
         ui.label("Sólidos CMYK y spot; también sólido contra degradado lineal opaco de proceso. RGB usa conversión simple a CMYK.");
-        ui.label("Los traps conservan las tintas y sobreimprimen. Para ver la aproximación en pantalla, activa View → Overprint Preview. No admite imágenes, degradados radiales, encuentros entre degradados, tintas técnicas ni transparencias.");
-        ui.label("Los traps existentes conservan sus ajustes. Selecciona todo el arte que pueda tapar un encuentro. Máximo: 80 trazados y 12.000 nodos por operación.");
+        ui.label("Los traps conservan las tintas y sobreimprimen. Para ver la aproximación en pantalla, activa View → Overprint Preview. Admite sólido hacia el marco de PNG/JPEG opacos incrustados. No admite imágenes vinculadas, transparencias, recortes, radiales, imagen contra imagen/degradado ni tintas técnicas.");
+        ui.label("Los traps existentes conservan sus ajustes. Selecciona todo el arte que pueda tapar un encuentro. Máximo: 80 objetos y 12.000 nodos por operación.");
     });
     app.ui.trapping = settings;
 }

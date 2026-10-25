@@ -1,5 +1,7 @@
 # VectorCraft Roadmap
 
+> Project KX27 · 2026-10-25: first solid-into-image trapping for fully opaque embedded PNG/JPEG frames, using the actual affine corners and only the solid ink in overprint. Image nodes and encoded pixels are preserved; transparency, silhouettes, linked images and image/image or image/gradient contacts remain unsupported. Upstream parity scores and estimates are unchanged. See [trapping scope](docs/trapcolor-trapping.md).
+
 > Project KX27 · 2026-10-24: opaque process linear gradients accept a solid-into-gradient trap at fixed width using only the solid ink in overprint. Sources stay unchanged; local inversion, gradient/gradient, radial/transparent/spot gradients and production validation remain out of scope. Upstream parity scores and estimates are unchanged. See [trapping scope](docs/trapcolor-trapping.md).
 
 > Project KX27 · 2026-10-24: read-only contact analysis shares the Apply geometry plan, reports source pairs and rule reasons, and invalidates after document/rule changes. Per-edge overrides, images and production RIP validation remain pending. Upstream parity scores and estimates are unchanged. See [trapping scope](docs/trapcolor-trapping.md).

@@ -2,9 +2,9 @@
 //! The panel and automation use the same validated, transactional commands.
 
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use vectorcraft_color::{BlendMode, Color, Paint, gradient::GradientKind};
-use vectorcraft_doc::{Appearance, AppearanceItem, Document, FillLayer, Node, NodeKind};
+use vectorcraft_doc::{Appearance, AppearanceItem, Document, FillLayer, ImageObject, Node, NodeKind};
 use vectorcraft_plugins::objects;
 use vectorcraft_trapping::{Modo, Opciones, PT_POR_MM, analizar_con, atrapar_con, leer_ajuste};
 
@@ -56,7 +56,24 @@ fn options(p: &Value) -> Result<Opciones> {
 fn targets(s: &Session, p: &Value) -> Result<Vec<NodeId>> {
     let st = s.doc()?;
     let selected = ids_param(p, "ids").unwrap_or_else(|| st.selection.objects.clone());
-    Ok(objects::filter_targets(&st.doc, &selected))
+    // Native-only extension of the vector plug-in target filter: include images in the
+    // same paint order, without changing which objects third-party plug-ins receive.
+    fn visit(list: &[std::sync::Arc<Node>], selected: &BTreeSet<NodeId>, inside: bool, out: &mut Vec<NodeId>) {
+        for n in list {
+            if !n.visible || n.locked {
+                continue;
+            }
+            let picked = inside || selected.contains(&n.id);
+            match &n.kind {
+                NodeKind::Path { guide: false, clipping: false, .. } | NodeKind::Compound { .. } | NodeKind::Image(_) if picked => out.push(n.id),
+                NodeKind::Group { children, .. } | NodeKind::Layer { children, .. } => visit(children, selected, picked, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(&st.doc.layers, &selected.into_iter().collect(), false, &mut out);
+    Ok(out)
 }
 
 /// Resolve links without changing the artwork. Display alternates never become spot plates.
@@ -148,9 +165,99 @@ fn source_label(doc: &Document, colors: &BTreeMap<String, vectorcraft_trapping::
     if let Some(c) = colors.get(key) {
         return Some(display_label(c, key));
     }
+    if let Some(id) = key.strip_prefix("IM").and_then(|s| s.parse::<u64>().ok()) {
+        let n = doc.node(NodeId(id))?;
+        return matches!(n.kind, NodeKind::Image(_)).then(|| format!("Imagen · {}", n.display_name()));
+    }
     let id = key.strip_prefix("GL")?.parse::<u64>().ok()?;
     let n = doc.node(NodeId(id))?;
     matches!(n.appearance.fill_paint(), Paint::Gradient(_)).then(|| format!("Degradado · {}", n.display_name()))
+}
+
+// No pixel colour decisions yet: only prove the rectangular image is fully opaque.
+// Bounded decoding happens on Analyze/Apply, never in a UI snapshot.
+const MAX_IMAGE_PIXELS: u64 = 32_000_000;
+fn validate_image(doc: &Document, im: &ImageObject, checked: &mut BTreeMap<String, (u32, u32)>, pixels: &mut u64, bytes: &mut usize) -> Result<()> {
+    if im.link.is_some() {
+        return Err(bad(APPLY, "Incrusta la imagen antes de aplicar trapping; no se usan vistas previas de vínculos."));
+    }
+    let blob = doc.images.get(&im.key).ok_or_else(|| bad(APPLY, "Faltan los datos de la imagen."))?;
+    if blob.is_proxy() {
+        return Err(bad(APPLY, "La imagen solo contiene una vista previa. Incrusta el original."));
+    }
+    let coefficients = im.xf.as_coeffs();
+    if im.width == 0
+        || im.height == 0
+        || coefficients.iter().any(|v| !v.is_finite())
+        || !im.xf.determinant().is_finite()
+        || im.xf.determinant().abs() < 1e-12
+    {
+        return Err(bad(APPLY, "El tamaño o la transformación de la imagen no es válido."));
+    }
+    for (x, y) in [(0.0, 0.0), (im.width as f64, 0.0), (im.width as f64, im.height as f64), (0.0, im.height as f64)] {
+        let p = im.xf * kurbo::Point::new(x, y);
+        if !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 4e6 || p.y.abs() > 4e6 {
+            return Err(bad(APPLY, "La imagen queda fuera del rango de coordenadas."));
+        }
+    }
+    if let Some(dim) = checked.get(&im.key) {
+        if *dim != (im.width, im.height) {
+            return Err(bad(APPLY, "Las dimensiones no coinciden con los píxeles de la imagen."));
+        }
+        return Ok(());
+    }
+    if bytes.saturating_add(blob.bytes.len()) > 64 * 1024 * 1024 {
+        return Err(bad(APPLY, "La selección supera 64 MB de imágenes distintas. Trabaja por partes o usa imágenes optimizadas."));
+    }
+    let reader = image::ImageReader::new(std::io::Cursor::new(blob.bytes.as_slice())).with_guessed_format().map_err(|e| bad(APPLY, e.to_string()))?;
+    let format = reader
+        .format()
+        .filter(|f| matches!(f, image::ImageFormat::Png | image::ImageFormat::Jpeg))
+        .ok_or_else(|| bad(APPLY, "Esta etapa admite imágenes PNG o JPEG incrustadas."))?;
+    let (w, h) = reader.into_dimensions().map_err(|e| bad(APPLY, format!("No se puede leer la imagen: {e}")))?;
+    let count = u64::from(w) * u64::from(h);
+    if (w, h) != (im.width, im.height) || count == 0 {
+        return Err(bad(APPLY, "Las dimensiones no coinciden con los píxeles de la imagen."));
+    }
+    if pixels.saturating_add(count) > MAX_IMAGE_PIXELS {
+        return Err(bad(APPLY, "La selección supera 32 megapíxeles de imágenes distintas. Trabaja por partes."));
+    }
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(blob.bytes.as_slice()), format);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|e| bad(APPLY, format!("No se pueden comprobar los píxeles: {e}")))?;
+    let transparent = match &decoded {
+        image::DynamicImage::ImageLumaA8(p) => p.pixels().any(|p| p.0[1] != u8::MAX),
+        image::DynamicImage::ImageRgba8(p) => p.pixels().any(|p| p.0[3] != u8::MAX),
+        image::DynamicImage::ImageLumaA16(p) => p.pixels().any(|p| p.0[1] != u16::MAX),
+        image::DynamicImage::ImageRgba16(p) => p.pixels().any(|p| p.0[3] != u16::MAX),
+        image::DynamicImage::ImageRgba32F(p) => p.pixels().any(|p| p.0[3] != 1.0),
+        _ => decoded.color().has_alpha(),
+    };
+    if transparent {
+        return Err(bad(
+            APPLY,
+            "La imagen contiene transparencia. Esta etapa trabaja con el marco completo de imágenes opacas, no con siluetas recortadas.",
+        ));
+    }
+    *pixels += count;
+    *bytes += blob.bytes.len();
+    checked.insert(im.key.clone(), (w, h));
+    Ok(())
+}
+
+// Only calculation input gets a four-corner polygon. The actual image stays an Image node.
+fn image_input(n: &Node, im: &ImageObject) -> Value {
+    let anchors: Vec<Value> = [(0.0, 0.0), (im.width as f64, 0.0), (im.width as f64, im.height as f64), (0.0, im.height as f64)]
+        .into_iter()
+        .map(|(x, y)| {
+            let p = im.xf * kurbo::Point::new(x, y);
+            json!({"p":[p.x,p.y]})
+        })
+        .collect();
+    json!({"id":n.id.0,"type":"path","path":{"subpaths":[{"closed":true,"anchors":anchors}]},
+        "fillRule":"nonzero","fills":[{"type":"image"}],"opaqueImage":true})
 }
 
 // Object attributes follow copies and clipboard operations without changing the file format.
@@ -160,6 +267,9 @@ fn metadata<'a>(n: &'a Node, key: &str) -> Option<&'a str> {
 }
 
 fn control_name(n: &Node) -> Option<&str> {
+    if matches!(n.kind, NodeKind::Image(_)) {
+        return None;
+    }
     metadata(n, "rule").or(n.name.as_deref())
 }
 
@@ -204,22 +314,26 @@ fn info(s: &Session, p: &Value) -> Result<Value> {
     let mut pairs = Vec::new();
     let mut artwork = 0;
     let mut gradients = 0;
+    let mut images = 0;
     for id in &ids {
         let Some(n) = st.doc.node(*id) else { continue };
         match control_name(n).and_then(leer_ajuste) {
             Some(Ok(Some(a))) => pairs.push(json!({
                 "id": id.0, "name": n.display_name(), "left": label(&a.izq, *id, "left"), "right": label(&a.der, *id, "right"), "leftKey": a.izq, "rightKey": a.der,
-                "relation": a.rel.to_string(), "widthMm": a.ancho_mm, "solidIntoGradient": a.der.starts_with("GL"),
+                "relation": a.rel.to_string(), "widthMm": a.ancho_mm, "solidIntoGradient": a.der.starts_with("GL"), "solidIntoImage": a.der.starts_with("IM"),
                 "blackLeft": blacks.contains(&a.izq), "blackRight": blacks.contains(&a.der),
             })),
             Some(_) => {}
             None => {
                 artwork += 1;
+                if matches!(n.kind,NodeKind::Image(_)) { images+=1; }
                 if matches!(n.appearance.fill_paint(), Paint::Gradient(_)) { gradients += 1; }
             }
         }
     }
-    Ok(json!({"ids": selected.iter().map(|id| id.0).collect::<Vec<_>>(), "artwork": artwork, "gradients": gradients, "pairs": pairs}))
+    Ok(
+        json!({"ids": selected.iter().map(|id| id.0).collect::<Vec<_>>(), "artwork": artwork, "gradients": gradients, "images": images, "pairs": pairs}),
+    )
 }
 
 fn query(s: &mut Session, p: &Value) -> Result<Value> {
@@ -229,11 +343,14 @@ fn query(s: &mut Session, p: &Value) -> Result<Value> {
 /// Unsupported art must fail before an edit, rather than produce plausible but wrong traps.
 fn validate(s: &Session, ids: &[NodeId]) -> Result<()> {
     if ids.len() > MAX_INPUTS {
-        return Err(bad(APPLY, "Selecciona como máximo 80 trazados, incluidos los traps. Trabaja por partes."));
+        return Err(bad(APPLY, "Selecciona como máximo 80 objetos, incluidos los traps. Trabaja por partes."));
     }
     let doc = &s.doc()?.doc;
     let mut count = 0;
     let mut artwork = 0;
+    let mut checked_images = BTreeMap::new();
+    let mut pixels = 0;
+    let mut image_bytes = 0;
     for id in ids {
         let n = doc.node(*id).ok_or_else(|| bad(APPLY, "Un objeto ya no existe. Vuelve a seleccionarlo."))?;
         let control = control_name(n).and_then(leer_ajuste).is_some();
@@ -277,6 +394,28 @@ fn validate(s: &Session, ids: &[NodeId]) -> Result<()> {
             continue;
         }
         artwork += 1;
+        if let NodeKind::Image(im) = &n.kind {
+            if n.extras().trace.is_some() || n.extras().perspective.is_some() {
+                return Err(bad(APPLY, "Usa una imagen normal, sin calco ni perspectiva vinculada."));
+            }
+            if n.appearance.items.iter().any(|item| !item.paint().is_none()) {
+                return Err(bad(APPLY, "La imagen debe estar sin rellenos ni contornos añadidos."));
+            }
+            validate_image(doc, im, &mut checked_images, &mut pixels, &mut image_bytes)?;
+            count += 4;
+            continue;
+        }
+        if matches!(n.kind, NodeKind::Compound { .. }) {
+            let mut unsupported = false;
+            n.walk(&mut |child| {
+                if child.id != n.id && !matches!(child.kind, NodeKind::Path { .. }) {
+                    unsupported = true;
+                }
+            });
+            if unsupported {
+                return Err(bad(APPLY, "El trazado compuesto contiene objetos que no son trazados."));
+            }
+        }
         let fills: Vec<_> = n
             .appearance
             .items
@@ -308,7 +447,7 @@ fn validate(s: &Session, ids: &[NodeId]) -> Result<()> {
         return Err(bad(APPLY, "La selección supera 12.000 nodos. Simplifica o trabaja por partes."));
     }
     if artwork < 2 {
-        return Err(bad(APPLY, "Selecciona al menos dos trazados de colores distintos y sus traps, si ya existen."));
+        return Err(bad(APPLY, "Selecciona dos objetos compatibles, por ejemplo un sólido y una imagen opaca; incluye sus traps al recalcular."));
     }
     Ok(())
 }
@@ -326,24 +465,43 @@ fn prepare(s: &Session, p: &Value) -> Result<(Opciones, Vec<NodeId>, Value)> {
         node.walk(&mut |n| {
             if n.visible
                 && !n.locked
-                && !matches!(n.kind, NodeKind::Group { .. } | NodeKind::Layer { .. } | NodeKind::Path { .. } | NodeKind::Compound { .. })
+                && !matches!(
+                    n.kind,
+                    NodeKind::Group { .. } | NodeKind::Layer { .. } | NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Image(_)
+                )
             {
                 unsupported = true;
             }
         });
         if unsupported {
-            return Err(bad(APPLY, "La selección contiene textos, imágenes u objetos vivos. Usa solo trazados de relleno plano."));
+            return Err(bad(
+                APPLY,
+                "La selección contiene textos u objetos vivos. Usa sólidos, degradados lineales opacos o imágenes PNG/JPEG opacas incrustadas.",
+            ));
         }
     }
     validate(s, &ids)?;
     let st = s.doc()?;
     let blacks = black_labels(s, &ids)?;
-    let bytes = objects::encode_input(&st.doc, &ids);
-    let mut input: Value = serde_json::from_slice(&bytes).map_err(|e| bad(APPLY, e.to_string()))?;
+    let objects = ids
+        .iter()
+        .map(|id| {
+            let n = st.doc.node(*id).ok_or_else(|| bad(APPLY, "El objeto ya no existe."))?;
+            if let NodeKind::Image(im) = &n.kind {
+                Ok(image_input(n, im))
+            } else {
+                objects::encode(n).ok_or_else(|| bad(APPLY, "El objeto no tiene geometría compatible."))
+            }
+        })
+        .collect::<Result<Vec<Value>>>()?;
+    let mut input = json!({"objects":objects});
     input["nativeInks"] = json!(true);
     for o in input.get_mut("objects").and_then(Value::as_array_mut).into_iter().flatten() {
         let id = o.get("id").and_then(Value::as_u64).ok_or_else(|| bad(APPLY, "Objeto sin identidad."))?;
         let n = st.doc.node(NodeId(id)).ok_or_else(|| bad(APPLY, "El objeto ya no existe."))?;
+        if matches!(n.kind, NodeKind::Image(_)) {
+            continue;
+        }
         if let Some(rule) = control_name(n).filter(|name| leer_ajuste(name).is_some()) {
             o["name"] = json!(rule);
             continue;
@@ -381,10 +539,10 @@ fn prepare(s: &Session, p: &Value) -> Result<(Opciones, Vec<NodeId>, Value)> {
             .ok_or_else(|| bad(APPLY, "El objeto seleccionado no es un trap con ajuste."))?;
         a.ancho_mm = number(pair, "widthMm", 0.1, 0.01, 2.0)?;
         let mode = choice(pair, "mode", "forward")?;
-        if (a.izq.starts_with("GL") || a.der.starts_with("GL")) && !matches!(mode, "forward" | "none") {
+        if [a.izq.as_str(), a.der.as_str()].iter().any(|s| s.starts_with("GL") || s.starts_with("IM")) && !matches!(mode, "forward" | "none") {
             return Err(bad(
                 APPLY,
-                "Sólido contra degradado conserva la dirección sólido hacia degradado. Puedes cambiar el ancho o excluir el par.",
+                "Sólido contra degradado o imagen conserva la dirección hacia ese objeto. Puedes cambiar el ancho o excluir el par.",
             ));
         }
         match mode {
@@ -467,6 +625,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         let result = objects::apply_output(d, &ids, output, parent).map_err(|e| bad(APPLY, e.to_string()))?;
         for id in &result {
             if let Some(n) = d.node_mut(*id)
+                && !matches!(n.kind, NodeKind::Image(_))
                 && let Some(paints) = n.name.as_ref().and_then(|name| inks.get(name))
             {
                 let rule = n.name.clone().unwrap_or_default();
@@ -505,7 +664,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "trapping.analyze", "Analyze Trapping Contacts", [], None,
-            "{ids?, widthMm?, direction?, black?, difference?, resetExisting?, pair?} → {ids, encounters, pairCount}; read-only shared Apply plan for opaque flat fills and solid into opaque process linear gradients", has_doc, analyze),
+            "{ids?, widthMm?, direction?, black?, difference?, resetExisting?, pair?} → {ids, encounters, pairCount}; read-only shared Apply plan for opaque flat fills, solid into opaque process linear gradients or embedded opaque PNG/JPEG image frames", has_doc, analyze),
         cmd!(query "trapping.info", "Trapping Info", [], None,
             "{ids?} → {ids, artwork, pairs: [{id, name, left, right, relation, widthMm}]}; no geometry calculation", has_doc, query),
         cmd!(
@@ -513,7 +672,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Trapping",
             [],
             None,
-            "{ids?, widthMm?: 0.01..2, direction?: auto|reverse|center, black?: overprint|trap, difference?: 0..100, resetExisting?: bool, pair?: {id, widthMm, mode: forward|reverse|center|none|overprint}} CMYK and named spot geometry as one undo step; solid into opaque process linear gradient uses only solid ink at constant width, overriding global direction/black/difference; native fills preserve spots and overprint; images, gradient/gradient and technical inks are not supported",
+            "{ids?, widthMm?: 0.01..2, direction?: auto|reverse|center, black?: overprint|trap, difference?: 0..100, resetExisting?: bool, pair?: {id, widthMm, mode: forward|reverse|center|none|overprint}} CMYK and named spot geometry as one undo step; solid into opaque process linear gradient uses only solid ink at constant width, overriding global direction/black/difference; native fills preserve spots and overprint; opaque embedded PNG/JPEG image frames accept only the solid ink at constant width; image/image, gradient/gradient, transparent or linked images and technical inks are not supported",
             has_doc,
             apply
         ),

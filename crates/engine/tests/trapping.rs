@@ -450,3 +450,255 @@ fn optional_user_gradient_files() {
         }
     }
 }
+
+fn image_bytes(format: image::ImageFormat, alpha: u8) -> Vec<u8> {
+    let pixels = image::RgbaImage::from_fn(4, 4, |x, y| image::Rgba([0, (100 + x * 30) as u8, (150 + y * 20) as u8, alpha]));
+    let pixels = if format == image::ImageFormat::Jpeg {
+        image::DynamicImage::ImageRgb8(image::DynamicImage::ImageRgba8(pixels).to_rgb8())
+    } else {
+        image::DynamicImage::ImageRgba8(pixels)
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut out, format).unwrap();
+    out.into_inner()
+}
+
+fn image_case(format: image::ImageFormat, above: bool, alpha: u8) -> (Session, NodeId, NodeId) {
+    let mut s = Session::new();
+    run(&mut s, "file.new", json!({"width":240,"height":150}));
+    let mut image_id = NodeId(0);
+    let mut solid_id = NodeId(0);
+    for is_image in if above { [false, true] } else { [true, false] } {
+        if is_image {
+            let bytes = image_bytes(format, alpha);
+            let r = run(
+                &mut s,
+                "file.place",
+                json!({"name":if format==image::ImageFormat::Jpeg {"Foto.jpg"} else {"Foto.png"},
+                "dataBase64":vectorcraft_format::base64_encode(&bytes),"link":false,"rect":[0,0,100,100]}),
+            );
+            image_id = NodeId(r["ids"][0].as_u64().unwrap());
+        } else {
+            solid_id = NodeId(run(&mut s, "shape.rectangle", json!({"x":80,"y":0,"width":100,"height":100}))["id"].as_u64().unwrap());
+            run(&mut s, "paint.setFill", json!({"color":{"model":"cmyk","c":0,"m":0,"y":1,"k":0}}));
+            run(&mut s, "paint.setStroke", json!({"none":true}));
+        }
+    }
+    run(&mut s, "select.all", json!({}));
+    (s, image_id, solid_id)
+}
+
+#[test]
+fn png_and_jpeg_trapping_preserves_pixels_kind_sources_stack_order_save_undo_and_pdf() {
+    use vectorcraft_doc::NodeKind;
+    for format in [image::ImageFormat::Png, image::ImageFormat::Jpeg] {
+        for above in [false, true] {
+            let (mut s, iid, sid) = image_case(format, above, 255);
+            let before = s.doc().unwrap().doc.clone();
+            let undo = s.doc().unwrap().history.undo.len();
+            let report = run(&mut s, "trapping.analyze", json!({"direction":"reverse","difference":100,"widthMm":0.2}));
+            assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+            assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+            assert_eq!(report["encounters"][0]["reason"], "solidIntoImage");
+            assert!(report["encounters"][0]["right"].as_str().unwrap().contains("Imagen"));
+            let r = run(&mut s, "trapping.apply", json!({"direction":"center","difference":100,"widthMm":0.2}));
+            assert_eq!(r["pairs"].as_array().unwrap().len(), 1);
+            assert_eq!(r["pairs"][0]["solidIntoImage"], true);
+            assert_eq!(r["pairs"][0]["relation"], ">");
+            let d = &s.doc().unwrap().doc;
+            assert_eq!(d.node(iid), before.node(iid));
+            assert_eq!(d.node(sid), before.node(sid));
+            assert_eq!(d.images, before.images);
+            let NodeKind::Image(im) = &d.node(iid).unwrap().kind else { panic!("image converted to path") };
+            assert!(std::sync::Arc::ptr_eq(&d.images[&im.key].bytes, &before.images[&im.key].bytes));
+            let tid = NodeId(r["pairs"][0]["id"].as_u64().unwrap());
+            let trap = d.node(tid).unwrap();
+            assert_eq!(trap.appearance.items.len(), 1);
+            assert!(trap.appearance.items[0].overprint());
+            assert_eq!(
+                trap.appearance.items[0].paint(),
+                &vectorcraft_color::Paint::solid(vectorcraft_color::Color::Cmyk { c: 0.0, m: 0.0, y: 1.0, k: 0.0 })
+            );
+            let edge = if above { 100.0 } else { 80.0 };
+            let b = trap.geometric_bounds().unwrap();
+            assert!((b.x0 - (edge - 0.2 * vectorcraft_trapping::PT_POR_MM)).abs() < 0.002, "{b:?}");
+            assert!((b.x1 - edge).abs() < 0.002);
+            let mut order = Vec::new();
+            d.walk(|n| order.push(n.id));
+            assert!(order.iter().position(|id| *id == tid) > order.iter().position(|id| *id == iid));
+            assert_eq!(vectorcraft_format::load(&vectorcraft_format::save(d, false)).unwrap(), **d);
+            let settings = serde_json::from_value(json!({"compression":{"compressText":false}})).unwrap();
+            let pdf = vectorcraft_pdf::export_with_report(d, &vectorcraft_pdf::PdfOptions { settings, ..Default::default() }).unwrap();
+            let text = String::from_utf8_lossy(&pdf.bytes);
+            assert!(text.contains("/Subtype/Image"));
+            assert!(text.contains("/OP true/op true/OPM 1"));
+            if let Ok(dir) = std::env::var("KX27_IMAGE_OUTPUT") {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(std::path::Path::new(&dir).join(format!("image-{format:?}-{above}.pdf")), pdf.bytes).unwrap();
+            }
+            let after = d.clone();
+            assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+            run(&mut s, "edit.undo", json!({}));
+            assert_eq!(s.doc().unwrap().doc, before);
+            run(&mut s, "edit.redo", json!({}));
+            assert_eq!(s.doc().unwrap().doc, after);
+            let again = run(&mut s, "trapping.apply", json!({"pair":{"id":tid.0,"mode":"forward","widthMm":0.3}}));
+            assert_eq!(again["ids"], r["ids"]);
+            assert_eq!(again["pairs"][0]["widthMm"], 0.3);
+            assert_eq!(s.doc().unwrap().doc.node(iid), before.node(iid));
+            for mode in ["reverse", "center", "overprint"] {
+                assert!(s.execute("trapping.apply", &json!({"pair":{"id":tid.0,"mode":mode}})).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn transformed_image_uses_its_actual_frame_and_not_its_axis_aligned_bounds() {
+    for xf in [
+        kurbo::Affine::new([0.0, 25.0, -25.0, 0.0, 100.0, 0.0]),
+        kurbo::Affine::new([-25.0, 0.0, 0.0, 25.0, 100.0, 0.0]),
+        kurbo::Affine::new([25.0, 0.0, 12.5, 25.0, 0.0, 0.0]),
+    ] {
+        let (mut s, iid, _) = image_case(image::ImageFormat::Png, true, 255);
+        s.edit("Synthetic placement", |d, _| {
+            if let vectorcraft_doc::NodeKind::Image(im) = &mut d.node_mut(iid).unwrap().kind {
+                im.xf = xf;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let before = s.doc().unwrap().doc.node(iid).unwrap().clone();
+        let r = run(&mut s, "trapping.apply", json!({"widthMm":0.2}));
+        let trap = s.doc().unwrap().doc.node(NodeId(r["pairs"][0]["id"].as_u64().unwrap())).unwrap();
+        let (path, _, _) = vectorcraft_plugins::objects::geometry(trap).unwrap();
+        for (_, _, a) in path.anchors() {
+            let p = xf.inverse() * a.p;
+            assert!(p.x >= -0.001 && p.x <= 4.001 && p.y >= -0.001 && p.y <= 4.001, "{p:?}");
+        }
+        assert_eq!(s.doc().unwrap().doc.node(iid), Some(&before));
+    }
+}
+
+#[test]
+fn transparent_missing_linked_invalid_and_budget_exceeding_images_are_atomic() {
+    for variant in 0..7 {
+        let (mut s, iid, _) = image_case(image::ImageFormat::Png, false, if variant == 0 { 254 } else { 255 });
+        if variant > 0 {
+            {
+                let d = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+                let vectorcraft_doc::NodeKind::Image(im) = &mut d.node_mut(iid).unwrap().kind else { panic!() };
+                let key = im.key.clone();
+                match variant {
+                    1 => im.link = Some(vectorcraft_doc::LinkInfo::new("missing.png")),
+                    2 => im.xf = kurbo::Affine::scale(0.0),
+                    3 => im.width = 5,
+                    4 => {
+                        d.images.remove(&key);
+                    }
+                    5 => {
+                        d.images.get_mut(&key).unwrap().bytes = std::sync::Arc::new(vec![1, 2, 3]);
+                    }
+                    _ => im.xf = kurbo::Affine::translate((f64::INFINITY, 0.0)),
+                }
+            }
+        }
+        let before = s.doc().unwrap().doc.clone();
+        let undo = s.doc().unwrap().history.undo.len();
+        for c in ["trapping.analyze", "trapping.apply"] {
+            assert!(s.execute(c, &json!({})).is_err(), "variant {variant}");
+        }
+        assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+    }
+    // Alpha 65534 must not be rounded up to 255 by an 8-bit opacity check.
+    let (mut s, iid, _) = image_case(image::ImageFormat::Png, false, 255);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(4, 4, image::Rgba([0, 0, 0, 65534u16])))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    s.edit("Synthetic 16-bit alpha", |d, _| {
+        let vectorcraft_doc::NodeKind::Image(im) = &d.node(iid).unwrap().kind else { panic!() };
+        let key = im.key.clone();
+        d.images.insert(key, vectorcraft_doc::ImageBlob::png(bytes.into_inner()));
+        Ok(())
+    })
+    .unwrap();
+    assert!(s.execute("trapping.apply", &json!({})).is_err());
+}
+
+#[test]
+fn image_references_are_read_only_in_the_vector_adapter_and_trap_names_do_not_repaint_images() {
+    use vectorcraft_plugins::objects::{self, OutObject};
+    let (mut s, iid, _) = image_case(image::ImageFormat::Png, false, 255);
+    let mut d = (*s.doc().unwrap().doc).clone();
+    let before = d.clone();
+    assert!(objects::filter_targets(&d, &[iid]).is_empty());
+    objects::apply_output(&mut d, &[iid], vec![OutObject { id: Some(iid), ..Default::default() }], None).unwrap();
+    assert_eq!(d, before);
+    assert!(
+        objects::apply_output(&mut d, &[iid], vec![OutObject { id: Some(iid), name: Some("changed".into()), ..Default::default() }], None).is_err()
+    );
+    assert_eq!(d, before);
+    run(&mut s, "object.setProps", json!({"ids":[iid.0],"name":format!("trap Y>IM{} 0.1",iid.0)}));
+    run(&mut s, "select.all", json!({}));
+    let original = s.doc().unwrap().doc.node(iid).unwrap().clone();
+    run(&mut s, "trapping.apply", json!({}));
+    assert_eq!(s.doc().unwrap().doc.node(iid), Some(&original));
+}
+
+#[test]
+fn image_frame_without_contact_is_a_successful_empty_analysis() {
+    let (mut s, iid, _) = image_case(image::ImageFormat::Png, false, 255);
+    run(&mut s, "select.set", json!({"ids":[iid.0]}));
+    run(&mut s, "object.move", json!({"dx":400,"dy":0}));
+    run(&mut s, "select.all", json!({}));
+    let before = s.doc().unwrap().doc.clone();
+    assert_eq!(run(&mut s, "trapping.analyze", json!({}))["encounters"], json!([]));
+    assert!(s.execute("trapping.apply", &json!({})).is_err());
+    assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+}
+
+#[test]
+fn huge_raster_headers_and_image_image_or_gradient_contacts_are_rejected() {
+    let (mut s, iid, _) = image_case(image::ImageFormat::Png, false, 255);
+    let mut bytes = image_bytes(image::ImageFormat::Png, 255);
+    bytes[16..20].copy_from_slice(&10000u32.to_be_bytes());
+    bytes[20..24].copy_from_slice(&10000u32.to_be_bytes());
+    let crc = crc32fast::hash(&bytes[12..29]);
+    bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+    s.edit("Synthetic large header", |d, _| {
+        let vectorcraft_doc::NodeKind::Image(im) = &mut d.node_mut(iid).unwrap().kind else { panic!() };
+        im.width = 10000;
+        im.height = 10000;
+        let key = im.key.clone();
+        d.images.insert(key, vectorcraft_doc::ImageBlob::png(bytes));
+        Ok(())
+    })
+    .unwrap();
+    let before = s.doc().unwrap().doc.clone();
+    let error = s.execute("trapping.apply", &json!({})).unwrap_err().to_string();
+    assert!(error.contains("32 megapíxeles"), "{error}");
+    assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+    for gradient in [false, true] {
+        let (mut s, _, sid) = image_case(image::ImageFormat::Png, false, 255);
+        if gradient {
+            run(
+                &mut s,
+                "paint.setFill",
+                json!({"ids":[sid.0],"gradient":{"kind":"linear","stops":[{"offset":0,"color":"#ffffff"},{"offset":1,"color":"#ff0000"}]}}),
+            );
+        } else {
+            run(
+                &mut s,
+                "file.place",
+                json!({"name":"second.png","dataBase64":vectorcraft_format::base64_encode(&image_bytes(image::ImageFormat::Png,255)),"link":false,"rect":[80,0,100,100]}),
+            );
+        }
+        run(&mut s, "select.all", json!({}));
+        let before = s.doc().unwrap().doc.clone();
+        assert!(s.execute("trapping.analyze", &json!({})).is_err());
+        assert!(s.execute("trapping.apply", &json!({})).is_err());
+        assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+    }
+}

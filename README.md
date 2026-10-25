@@ -1,5 +1,7 @@
 > Fork de VectorCraft. Nombre en clave y alcance: [Project KX27](docs/project-kx27.md).
 
+Project KX27 adds initial **solid into opaque embedded PNG/JPEG image frames** trapping, preserving image objects and pixels. See [scope and limits](docs/trapcolor-trapping.md).
+
 Project KX27 supports **solid into opaque linear gradient** trapping at constant width, using only the solid ink in overprint. See [scope and limits](docs/trapcolor-trapping.md).
 
 Project KX27 adds **Analizar contactos** to the persistent Trapping palette: review proposed encounters before applying. See [scope and limits](docs/trapcolor-trapping.md).

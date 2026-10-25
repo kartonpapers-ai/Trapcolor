@@ -380,6 +380,23 @@ fn members(doc: &mut Document, old: &[Arc<Node>], path: PathData) -> Vec<Arc<Nod
 
 /// Writes `o` into `n` (an input object, or a fresh node for a new one).
 fn write(doc: &mut Document, n: &mut Node, o: OutObject, at: &str) -> Result<()> {
+    // Native trapping may include images as read-only anchors in paint order. The general
+    // plug-in target filter still only supplies vector paths. Never turn an image reference
+    // into an empty path, and never admit edits to its pixels or placement through this adapter.
+    if matches!(n.kind, NodeKind::Image(_)) {
+        if o.compound.is_some()
+            || o.name.is_some()
+            || o.path.is_some()
+            || o.rule.is_some()
+            || o.fills.is_some()
+            || o.strokes.is_some()
+            || o.opacity.is_some()
+        {
+            return Err(out_err(at, "an image may only be returned as an unchanged id reference"));
+        }
+        return Ok(());
+    }
+
     let (cur_path, cur_rule, cur_compound) = geometry(n).unwrap_or((PathData::default(), FillRule::NonZero, false));
     let compound = o.compound.unwrap_or(cur_compound);
     let rule = o.rule.unwrap_or(cur_rule);

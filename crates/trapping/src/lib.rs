@@ -223,6 +223,8 @@ struct Objeto {
     id: u64,
     // Set only by the native host after validating an opaque process linear gradient.
     gradiente: bool,
+    // Host-validated opaque embedded image frame; never a traced pixel silhouette.
+    imagen: bool,
     forma: Vec<Forma>,
     caja: [f64; 4],
     /// Si tiene curvas (sus polígonos quedan hasta `TOLERANCIA` por dentro de la curva real).
@@ -293,6 +295,7 @@ fn leer_objeto(o: &Value) -> Option<Objeto> {
     let arriba = fills.last()?; // sin relleno no tapa nada ni lleva trap
     let color = (arriba["type"] == "solid").then(|| Color::leer(&arriba["color"])).flatten();
     let gradiente = o["opaqueLinear"].as_bool() == Some(true);
+    let imagen = o["opaqueImage"].as_bool() == Some(true);
     let regla = if o["fillRule"].as_str() == Some("evenodd") { FillRule::EvenOdd } else { FillRule::NonZero };
     let forma = poligonos(&o["path"]).simplify_shape(regla);
     let caja = caja_de(&forma);
@@ -302,7 +305,7 @@ fn leer_objeto(o: &Value) -> Option<Objeto> {
         .flatten()
         .flat_map(|s| s["anchors"].as_array().into_iter().flatten())
         .any(|a| a.get("in").is_some() || a.get("out").is_some());
-    (!forma.is_empty()).then_some(Objeto { id, gradiente, forma, caja, curvo, color })
+    (!forma.is_empty()).then_some(Objeto { id, gradiente, imagen, forma, caja, curvo, color })
 }
 
 /// Ensancha (`d` > 0) o achica (`d` < 0) las formas.
@@ -529,7 +532,7 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
         }
     }
     let objetos: Vec<Objeto> = arte.iter().filter_map(|o| leer_objeto(o)).collect();
-    if objetos.iter().filter(|o| o.color.is_some() || o.gradiente).count() < 2 {
+    if objetos.iter().filter(|o| o.color.is_some() || o.gradiente || o.imagen).count() < 2 {
         return Err("Selecciona al menos dos objetos con rellenos compatibles que se toquen.".into());
     }
     let ancho_mm_def = ancho / PT_POR_MM;
@@ -537,24 +540,41 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
     let mut encuentros = Vec::new();
     for j in 1..objetos.len() {
         let b = &objetos[j];
-        if b.color.is_none() && !b.gradiente {
+        if b.color.is_none() && !b.gradiente && !b.imagen {
             continue;
         }
         for i in 0..j {
             let a = &objetos[i];
-            if a.gradiente && b.gradiente {
+            if (a.gradiente || a.imagen) && (b.gradiente || b.imagen) {
                 if cerca(&a.caja, &b.caja, ancho) && area(&zona_visible(&objetos, i, j, Expande::Centro, ancho)) >= (ancho * ancho * 0.01).max(1e-4) {
-                    return Err("El encuentro entre dos degradados todavía no está admitido. Trabaja con sólido contra degradado lineal.".into());
+                    return Err(if a.gradiente && b.gradiente {
+                        "El encuentro entre dos degradados todavía no está admitido. Trabaja con sólido contra degradado lineal."
+                    } else {
+                        "Esta etapa admite sólido contra imagen; no imagen contra imagen ni imagen contra degradado."
+                    }
+                    .into());
                 }
                 continue;
             }
             let (Some(ca), Some(cb)) = (a.color.as_ref().or(b.color.as_ref()), b.color.as_ref().or(a.color.as_ref())) else { continue };
-            if a.color.is_none() && !a.gradiente {
+            if a.color.is_none() && !a.gradiente && !a.imagen {
                 continue;
             }
-            let gradiente = a.gradiente || b.gradiente;
-            let la = if a.gradiente { format!("GL{}", a.id) } else { etiqueta(ca) };
-            let lb = if b.gradiente { format!("GL{}", b.id) } else { etiqueta(cb) };
+            let destino = a.gradiente || b.gradiente || a.imagen || b.imagen;
+            let la = if a.imagen {
+                format!("IM{}", a.id)
+            } else if a.gradiente {
+                format!("GL{}", a.id)
+            } else {
+                etiqueta(ca)
+            };
+            let lb = if b.imagen {
+                format!("IM{}", b.id)
+            } else if b.gradiente {
+                format!("GL{}", b.id)
+            } else {
+                etiqueta(cb)
+            };
             if la == lb {
                 continue;
             }
@@ -566,8 +586,8 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
                 .find(|aj| aj.es_del_par(&la, &lb))
                 .cloned()
                 .unwrap_or_else(|| {
-                    if gradiente {
-                        let (izq, der) = if a.gradiente { (&lb, &la) } else { (&la, &lb) };
+                    if destino {
+                        let (izq, der) = if a.gradiente || a.imagen { (&lb, &la) } else { (&la, &lb) };
                         return Ajuste { izq: izq.clone(), der: der.clone(), rel: '>', ancho_mm: ancho_mm_def };
                     }
                     let (claro, oscuro) = if cb.claridad() >= ca.claridad() { (&lb, &la) } else { (&la, &lb) };
@@ -582,9 +602,9 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
                     }
                     aj
                 });
-            if gradiente {
-                // Width and exclusion may be saved; direction is always solid into gradient.
-                let (solid, gradient) = if a.gradiente { (&lb, &la) } else { (&la, &lb) };
+            if destino {
+                // Width and exclusion may be saved; direction is always solid into the opaque destination.
+                let (solid, gradient) = if a.gradiente || a.imagen { (&lb, &la) } else { (&la, &lb) };
                 ajuste.izq = solid.clone();
                 ajuste.der = gradient.clone();
                 if ajuste.rel != '-' {
@@ -596,7 +616,7 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
             if !cerca(&a.caja, &b.caja, w0) {
                 continue;
             }
-            let color = if gradiente { ca.clone() } else { color_trap(ca, cb).0 };
+            let color = if destino { ca.clone() } else { color_trap(ca, cb).0 };
             let idx = match pares.iter().position(|p| p.ajuste.es_del_par(&la, &lb)) {
                 Some(k) => k,
                 None => {
@@ -610,8 +630,8 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
                 'S' if ajuste.izq == lb => Expande::Sobre,
                 'S' => Expande::Arriba,
                 // Sin trap: la zona solo marca dónde está el par (el objeto va sin relleno).
-                '-' if gradiente && a.gradiente => Expande::Arriba,
-                '-' if gradiente => Expande::Abajo,
+                '-' if destino && (a.gradiente || a.imagen) => Expande::Arriba,
+                '-' if destino => Expande::Abajo,
                 '-' if cb.claridad() >= ca.claridad() => Expande::Arriba,
                 '-' => Expande::Abajo,
                 _ if ajuste.izq == lb => Expande::Arriba,
@@ -619,7 +639,9 @@ fn plan<'a>(entrada: &'a Value, opc: &Opciones) -> Result<Plan<'a>, String> {
             };
             let z = zona_visible(&objetos, i, j, expande, w0);
             if area(&z) >= (w0 * w0 * 0.01).max(1e-4) {
-                let reason = if gradiente {
+                let reason = if a.imagen || b.imagen {
+                    "solidIntoImage"
+                } else if destino {
                     "solidIntoGradient"
                 } else if controles.iter().filter_map(|c| c.1.as_ref()).any(|aj| aj.es_del_par(&la, &lb)) {
                     "savedRule"

@@ -75,7 +75,7 @@ fn trapping_panel_visual_capture() {
     let Ok(dir) = std::env::var("TRAPCOLOR_SCREENSHOTS") else { return };
     std::fs::create_dir_all(&dir).unwrap();
     for (theme, width) in [(vectorcraft_ui_egui::theme::Brightness::MediumDark, 340.0), (vectorcraft_ui_egui::theme::Brightness::Light, 280.0)] {
-        let mut app = app();
+        let mut app = if std::env::var("KX27_IMAGE_CAPTURE").is_ok() { image_app().0 } else { app() };
         if std::env::var("KX27_GRADIENT_CAPTURE").is_ok() {
             let id = app.session.doc().unwrap().selection.objects[0].0;
             app.run(
@@ -229,6 +229,61 @@ fn gradient_analysis_and_apply_show_fixed_rule_without_internal_keys() {
     assert_eq!(p["relation"], ">");
     assert!(p["right"].as_str().unwrap().contains("Degradado"));
     assert!(!p["name"].as_str().unwrap().contains("GL"));
+    h.get_by_label("Actualizar par").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed);
+}
+
+fn image_app() -> (VectorcraftApp, vectorcraft_doc::NodeId) {
+    let mut app = app();
+    app.run("select.all", json!({})).unwrap();
+    app.run("edit.clear", json!({})).unwrap();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, image::Rgb([0, 180, 220]))).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let r = app
+        .run(
+            "file.place",
+            json!({"name":"Foto.png","dataBase64":vectorcraft_format::base64_encode(&png.into_inner()),"link":false,"rect":[0,0,100,100]}),
+        )
+        .unwrap();
+    let id = vectorcraft_doc::NodeId(r["ids"][0].as_u64().unwrap());
+    app.run("shape.rectangle", json!({"x":80,"y":0,"width":100,"height":100})).unwrap();
+    app.run("paint.setFill", json!({"color":{"model":"cmyk","c":0,"m":0,"y":1,"k":0}})).unwrap();
+    app.run("paint.setStroke", json!({"none":true})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    (app, id)
+}
+
+#[test]
+fn image_frame_analysis_and_apply_keep_the_image_and_explain_the_rule() {
+    let (app, id) = image_app();
+    let original = app.session.doc().unwrap().doc.node(id).unwrap().clone();
+    let before = app.session.doc().unwrap().doc.clone();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 1250.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Analizar contactos").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    assert!(std::sync::Arc::ptr_eq(&before, &h.state().session.doc().unwrap().doc));
+    h.get_by_label("Aplicar a la selección").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    let r = vectorcraft_engine::cmd::trapping::snapshot(&h.state().session).unwrap();
+    assert_eq!(r["pairs"][0]["solidIntoImage"], true);
+    assert!(r["pairs"][0]["right"].as_str().unwrap().contains("Imagen"));
+    assert_eq!(h.state().session.doc().unwrap().doc.node(id), Some(&original));
     h.get_by_label("Actualizar par").click();
     h.run_steps(4);
     assert!(!h.state().ui.trapping.failed);
