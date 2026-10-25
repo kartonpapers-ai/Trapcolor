@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use vectorcraft_color::{BlendMode, Color, Paint, gradient::GradientKind};
 use vectorcraft_doc::{Appearance, AppearanceItem, Document, FillLayer, ImageObject, Node, NodeKind};
+use vectorcraft_geom::Rect;
 use vectorcraft_plugins::objects;
 use vectorcraft_trapping::{Modo, Opciones, PT_POR_MM, analizar_con, atrapar_con, leer_ajuste};
 
@@ -663,6 +664,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "trapping.capture", "Capture Experimental Ink Plate", [], None,
+            "{plate?: Cyan|Magenta|Yellow|Black|spot swatch name, dpi?: 36..600 (150), artboard?: index (0), region?: [x0,y0,x1,y1] in document points} → {experimental, plate, plates, dpi, pixelMm, region, width, height, dataBase64, warnings}; read-only sampled plate preview of the composed document, including raster images; at most 4 MP output, 32 MP / 64 MiB source images; approximate overprint, no conflict detection or trapping; independent of selection and the 80-object Apply limit", has_doc, capture),
         cmd!(query "trapping.analyze", "Analyze Trapping Contacts", [], None,
             "{ids?, widthMm?, direction?, black?, difference?, resetExisting?, pair?} → {ids, encounters, pairCount}; read-only shared Apply plan for opaque flat fills, solid into opaque process linear gradients or embedded opaque PNG/JPEG image frames", has_doc, analyze),
         cmd!(query "trapping.info", "Trapping Info", [], None,
@@ -677,4 +680,47 @@ pub fn specs() -> Vec<CommandSpec> {
             apply
         ),
     ]
+}
+
+fn capture(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "trapping.capture";
+    let doc = &s.doc()?.doc;
+    let plate = match p.get("plate") {
+        None => "Cyan",
+        Some(v) => v.as_str().ok_or_else(|| bad(C, "plate debe ser el nombre de una tinta."))?,
+    };
+    let dpi = match p.get("dpi") {
+        None => 150.0,
+        Some(v) => v.as_f64().ok_or_else(|| bad(C, "dpi debe ser numérico."))?,
+    };
+    let region = if let Some(v) = p.get("region") {
+        let a = v.as_array().filter(|a| a.len() == 4).ok_or_else(|| bad(C, "region debe contener [x0,y0,x1,y1]."))?;
+        let values = a.iter().map(|v| v.as_f64().ok_or_else(|| bad(C, "Las coordenadas deben ser numéricas."))).collect::<Result<Vec<_>>>()?;
+        let mut v = values.into_iter();
+        let mut next = || v.next().ok_or_else(|| bad(C, "Falta una coordenada."));
+        Rect::new(next()?, next()?, next()?, next()?)
+    } else {
+        let index = match p.get("artboard") {
+            None => 0,
+            Some(v) => v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| bad(C, "artboard debe ser un índice válido."))?,
+        };
+        doc.artboards.get(index).ok_or_else(|| bad(C, "La mesa de trabajo no existe."))?.rect
+    };
+    let mut renderer = vectorcraft_render::Renderer::new();
+    let image = vectorcraft_render::technical::capture_plate(&mut renderer, doc, region, dpi, plate).map_err(|e| bad(C, e))?;
+    let png = image.to_png().map_err(|e| bad(C, e))?;
+    let plates: Vec<_> = vectorcraft_doc::inks::plates(doc).iter().map(|p| json!({"name":p.name,"spot":p.spot})).collect();
+    Ok(json!({
+        "experimental":true, "plate":plate, "plates":plates, "dpi":dpi, "pixelMm":25.4/dpi,
+        "region":[region.x0,region.y0,region.x1,region.y1], "width":image.width,"height":image.height,
+        "dataBase64":vectorcraft_format::base64_encode(&png),
+        "colorSettings":vectorcraft_color::cms::active_settings(),
+        "warnings":[
+            "Captura experimental: negro = tinta; blanco = ausencia de tinta. No detecta conflictos ni genera traps.",
+            "Muestreo limitado por los ppp: un detalle menor que un píxel puede perderse. No sirve para medir el ancho de trapping.",
+            "Sobreimpresión aproximada mediante Multiply. Transparencias y mezclas siguen el renderizador de vista previa; no es una prueba RIP. Efectos y patrones requieren expandirse antes.",
+            "Solo conserva spots que existan como muestras vinculadas en el documento. No recupera tintas planas convertidas a RGB o CMYK.",
+            "Captura toda el área indicada, incluidas las capas imprimibles visibles bloqueadas y los traps existentes. No excluye automáticamente troqueles."
+        ]
+    }))
 }

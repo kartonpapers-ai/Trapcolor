@@ -22,6 +22,22 @@ struct Analysis {
     report: Value,
 }
 
+struct Capture {
+    document: Arc<Document>,
+    colors: vectorcraft_color::cms::ColorSettings,
+    plate: String,
+    dpi: f64,
+    artboard: usize,
+    report: Value,
+    texture: egui::TextureHandle,
+}
+
+impl std::fmt::Debug for Capture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Capture").field("plate", &self.plate).field("dpi", &self.dpi).field("artboard", &self.artboard).finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -39,6 +55,11 @@ pub struct Settings {
     analysis: Option<Arc<Analysis>>,
     #[serde(skip)]
     analysis_page: usize,
+    pub capture_dpi: f64,
+    pub capture_plate: usize,
+    pub capture_zoom: f32,
+    #[serde(skip)]
+    capture: Option<Arc<Capture>>,
 }
 
 impl Default for Settings {
@@ -53,6 +74,10 @@ impl Default for Settings {
             document: None,
             analysis: None,
             analysis_page: 0,
+            capture_dpi: 150.0,
+            capture_plate: 0,
+            capture_zoom: 1.0,
+            capture: None,
         }
     }
 }
@@ -69,6 +94,14 @@ impl Settings {
         self.difference = self.difference.clamp(0.0, 100.0);
         self.direction = self.direction.min(2);
         self.black = self.black.min(1);
+        if !self.capture_dpi.is_finite() {
+            self.capture_dpi = 150.0;
+        }
+        self.capture_dpi = self.capture_dpi.clamp(36.0, 600.0);
+        if !self.capture_zoom.is_finite() {
+            self.capture_zoom = 1.0;
+        }
+        self.capture_zoom = self.capture_zoom.clamp(1.0, 8.0);
     }
 
     fn params(&self) -> Value {
@@ -115,6 +148,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     settings.sanitize();
     let doc_uid = app.session.active().map(|st| st.uid);
     if settings.document != doc_uid {
+        clear_capture(ui, &mut settings);
         settings.analysis = None;
         settings.message.clear();
         settings.failed = false;
@@ -125,6 +159,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let pairs = snapshot.as_ref().and_then(|v| v["pairs"].as_array()).cloned().unwrap_or_default();
     let ids = snapshot.as_ref().map(|v| v["ids"].clone()).unwrap_or_else(|| json!([]));
     let can_apply = doc_uid.is_some() && artwork >= 2;
+
+    capture_section(app, ui, &mut settings);
 
     widgets::section_header(ui, "Reglas para pares nuevos");
     ui.add_enabled_ui(doc_uid.is_some(), |ui| {
@@ -376,4 +412,106 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.label("Los traps existentes conservan sus ajustes. Selecciona todo el arte que pueda tapar un encuentro. Máximo: 80 objetos y 12.000 nodos por operación.");
     });
     app.ui.trapping = settings;
+}
+
+fn clear_capture(_ui: &Ui, settings: &mut Settings) {
+    // Dropping the last handle frees the old texture, with no image-loader cache.
+    settings.capture = None;
+}
+
+fn capture_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settings) {
+    let artboard = app.session.active_index().and_then(|i| app.views.get(i)).map_or(0, |v| v.artboard);
+    let plates = app.session.active().map(|st| vectorcraft_doc::inks::plates(&st.doc)).unwrap_or_default();
+    settings.capture_plate = settings.capture_plate.min(plates.len().saturating_sub(1));
+    let plate = plates.get(settings.capture_plate).map(|p| p.name.clone()).unwrap_or_default();
+    let stale = settings.capture.as_ref().is_some_and(|c| {
+        c.plate != plate
+            || c.dpi != settings.capture_dpi
+            || c.artboard != artboard
+            || c.colors != vectorcraft_color::cms::active_settings()
+            || app.session.active().is_none_or(|st| !Arc::ptr_eq(&c.document, &st.doc))
+    });
+    if stale {
+        clear_capture(ui, settings);
+    }
+    egui::CollapsingHeader::new("Captura por tintas · Fase 1").show(ui, |ui| {
+        ui.label("Mesa completa, sin marcas de selección. No modifica el documento ni aplica trapping.");
+        ui.add_enabled_ui(!plates.is_empty(), |ui| {
+            let labels: Vec<&str> = plates.iter().map(|p| p.name.as_str()).collect();
+            if let Some(i) = widgets::dropdown_names(ui, "capture-plate", &plate, &labels, ui.available_width().min(220.0)) {
+                settings.capture_plate = i;
+                clear_capture(ui, settings);
+            }
+            let old_dpi = settings.capture_dpi;
+            number(ui, "Resolución", &mut settings.capture_dpi, 36.0..=600.0, " ppp");
+            if old_dpi != settings.capture_dpi {
+                clear_capture(ui, settings);
+            }
+            if ui.button("Capturar tinta").clicked() {
+                clear_capture(ui, settings);
+                let plate = plates.get(settings.capture_plate).map(|p| p.name.clone()).unwrap_or_default();
+                match app.run("trapping.capture", json!({"plate":plate,"dpi":settings.capture_dpi,"artboard":artboard})) {
+                    Ok(mut report) => {
+                        let pixels = report["dataBase64"]
+                            .as_str()
+                            .and_then(vectorcraft_format::base64_decode)
+                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                            .map(|image| image.to_rgba8());
+                        if let (Some(pixels), Some(st)) = (pixels, app.session.active()) {
+                            // Upload once on explicit capture. This build installs SVG loaders
+                            // only, so PNGs use the same direct texture path as other panels.
+                            let color =
+                                egui::ColorImage::from_rgba_unmultiplied([pixels.width() as usize, pixels.height() as usize], pixels.as_raw());
+                            let texture = ui.ctx().load_texture("kx27-technical-capture", color, egui::TextureOptions::NEAREST);
+                            if let Some(obj) = report.as_object_mut() {
+                                obj.remove("dataBase64");
+                            }
+                            settings.capture = Some(Arc::new(Capture {
+                                document: st.doc.clone(),
+                                colors: vectorcraft_color::cms::active_settings(),
+                                plate: plate.clone(),
+                                dpi: settings.capture_dpi,
+                                artboard,
+                                report,
+                                texture,
+                            }));
+                            settings.message = "Captura experimental lista. El documento no se modificó.".into();
+                            settings.failed = false;
+                        } else {
+                            settings.message = "No se pudo leer la captura.".into();
+                            settings.failed = true;
+                        }
+                    }
+                    Err(e) => {
+                        settings.message = e;
+                        settings.failed = true;
+                    }
+                }
+            }
+        });
+        widgets::dim_label(
+            ui,
+            "Experimental · Negro = tinta; blanco = sin tinta. Sobreimpresión aproximada. No es una prueba RIP ni detecta conflictos.",
+        );
+        if let Some(c) = &settings.capture {
+            ui.label(format!(
+                "{} · {} × {} px · {:.3} mm/píxel",
+                c.plate,
+                c.report["width"],
+                c.report["height"],
+                c.report["pixelMm"].as_f64().unwrap_or(0.0)
+            ));
+            ui.add(egui::Slider::new(&mut settings.capture_zoom, 1.0..=8.0).text("Ampliación"));
+            let width = ui.available_width().max(1.0) * settings.capture_zoom;
+            let ratio = c.report["height"].as_f64().unwrap_or(1.0) / c.report["width"].as_f64().unwrap_or(1.0).max(1.0);
+            egui::ScrollArea::both().id_salt("capture-image").max_height(280.0).show(ui, |ui| {
+                ui.add(egui::Image::new(&c.texture).fit_to_exact_size(egui::vec2(width, width * ratio as f32)));
+            });
+            ui.label("Los detalles menores que un píxel pueden perderse. Ampliar esta imagen no aumenta su resolución.");
+            if !plates.iter().any(|p| p.spot) {
+                ui.label("Sin muestras spot: esta captura no puede recuperar tintas planas convertidas a RGB o CMYK.");
+            }
+        }
+    });
+    widgets::divider(ui);
 }

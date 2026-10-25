@@ -1,5 +1,7 @@
 # Roadmap: milestones and what's next
 
+> Project KX27 · 2026-10-25: experimental read-only ink captures compose a full artboard or region per CMYK/linked-spot plate, including embedded raster alpha and clips. Sampled preview with approximate overprint, bounded pixels and source assets; no contact detection or new trap geometry. The 80-object Apply limit and upstream parity scores are unchanged. See [capture scope](trapcolor-trapping.md#captura-experimental-por-tintas-fase-1).
+
 > Project KX27 · 2026-10-25: first solid-into-image trapping for fully opaque embedded PNG/JPEG frames, using the actual affine corners and only the solid ink in overprint. Image nodes and encoded pixels are preserved; transparency, silhouettes, linked images and image/image or image/gradient contacts remain unsupported. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).
 
 > Project KX27 · 2026-10-24: opaque process linear gradients accept a solid-into-gradient trap at fixed width using only the solid ink in overprint. Sources stay unchanged; local inversion, gradient/gradient, radial/transparent/spot gradients and production validation remain out of scope. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).

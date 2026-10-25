@@ -103,10 +103,50 @@ fn trapping_panel_visual_capture() {
             app,
         );
         h.run_steps(4);
-        h.get_by_label("Analizar contactos").click();
+        if std::env::var("KX27_TECHNICAL_CAPTURE").is_ok() {
+            h.get_by_label("Captura por tintas · Fase 1").click();
+            h.run_steps(4);
+            h.get_by_label("Capturar tinta").click();
+        } else {
+            h.get_by_label("Analizar contactos").click();
+        }
         h.run_steps(4);
         h.render().unwrap().save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
     }
+}
+
+#[test]
+fn experimental_capture_is_read_only_and_the_panel_stays_available() {
+    let mut app = app();
+    app.ui.trapping.capture_dpi = 72.0;
+    let before = app.session.doc().unwrap().doc.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 1400.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Captura por tintas · Fase 1").click();
+    h.run_steps(4);
+    h.get_by_label("Capturar tinta").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    h.get_by_label("Cyan · 200 × 150 px · 0.353 mm/píxel");
+    assert!(std::sync::Arc::ptr_eq(&before, &h.state().session.doc().unwrap().doc));
+    assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo);
+    h.state_mut().run("shape.rectangle", json!({"x":0,"y":0,"width":5,"height":5})).unwrap();
+    h.run_steps(4);
+    assert!(h.query_by_label("Cyan · 200 × 150 px · 0.353 mm/píxel").is_none(), "edited document invalidates capture");
+    h.get_by_label("Capturar tinta");
 }
 
 #[test]

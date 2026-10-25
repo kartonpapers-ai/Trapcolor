@@ -1,6 +1,6 @@
 # Project KX27: paleta de trapping
 
-Estado: primera etapa de sólido hacia imagen PNG/JPEG opaca incrustada; degradados lineales y spots sólidos conservados, 2026-10-25. No cambia la calificación alfa del editor.
+Estado: captura por tintas experimental de solo lectura añadida; trapping de sólidos, spots, degradados lineales e imágenes opacas conservado, 2026-10-25. No cambia la calificación alfa del editor.
 
 ## Uso
 
@@ -13,6 +13,21 @@ Estado: primera etapa de sólido hacia imagen PNG/JPEG opaca incrustada; degrada
 La paleta puede flotar o acoplarse como los demás paneles. Su ubicación se guarda con los espacios de trabajo; sus parámetros se serializan en las preferencias de interfaz. Las reglas nuevas se guardan en los atributos `data-kx27-trap-v1-*` del objeto, separadas de los nombres visibles y asociadas al ID del trap. Acompañan las copias del objeto sin cambiar el formato nativo. Se leen también los nombres de controles del plugin 0.4; al recalcular se migran a metadatos. El plugin WASM original no interpreta estas reglas nuevas. Aplicar o actualizar un par es un solo paso de deshacer.
 
 **Localizar** selecciona un trap en el lienzo. Para volver a calcular, selecciona de nuevo el arte y sus traps. Los pares mostrados pertenecen a la selección actual.
+
+## Captura experimental por tintas: fase 1
+
+En **Captura por tintas · Fase 1**, elige una tinta, define los ppp y pulsa **Capturar tinta**. Se captura la mesa activa completa, sin selección ni controles de edición. Negro representa tinta y blanco ausencia de esa tinta. La ampliación y el desplazamiento permiten inspeccionar el mapa; ampliar no añade resolución. No es un análisis de conflictos y no crea, cambia ni elimina traps.
+
+- Comando de consulta `trapping.capture`: `{plate?, dpi?:36..600 (150), artboard?:index (0), region?:[x0,y0,x1,y1]}`; coordenadas en puntos. Devuelve PNG base64, tamaño, resolución, milímetros por píxel, región, lista de planchas, ajustes de color y advertencias explícitas. Una región pequeña permite mayor resolución dentro del presupuesto; el panel inicial captura solo la mesa completa.
+- El cálculo usa el documento compuesto y todos sus oclusores, aunque no estén seleccionados o estén bloqueados. Excluye guías, capas ocultas, plantillas y capas no imprimibles; no excluye automáticamente troqueles visibles imprimibles ni traps existentes. Ignora la vista de contornos y el dimming de imágenes de las capas, sin cambiar esas opciones en el documento.
+- Las tintas planas requieren muestras spot vinculadas. Un SVG que convirtió Pantone a RGB no permite reconstruir su identidad. El alternativo de un spot no se vierte en las planchas de proceso. RGB y Lab se convierten con los ajustes de color activos.
+- Las imágenes incrustadas se separan en una copia temporal: muestras CMYK originales cuando existen, RGB separado mediante LUT del perfil activo, sin contribución a spots. Se conserva alfa; los píxeles opacos sin tinta en una plancha aún calan la tinta inferior, y los transparentes la dejan pasar. Recortes y máscaras vectoriales de opacidad siguen el renderizador; las imágenes dentro de máscaras de opacidad se rechazan para no recolorear su luminancia por error.
+- Presupuesto independiente de Apply: 4 MP de salida, 32 MP de imágenes fuente acumulados, 64 MiB codificados, 16.384 px por lado de imagen fuente, 20.000 nodos y 128 niveles. Se revisan cabeceras antes de decodificar y se limita memoria de decodificación. Conservadoramente se cuentan también los assets no utilizados. No se baja la resolución silenciosamente. Imágenes dañadas, ausentes, vinculadas o proxy devuelven error.
+- Primera versión: efectos y patrones, símbolos/documentos colocados y otros objetos vivos deben expandirse en una copia antes de capturar. La sobreimpresión usa la aproximación Multiply del renderer existente, no todos los modos PDF de sobreimpresión. Mezclas, interpolación de degradados, antialiasing y conversiones de color son los de una previsualización de 8 bits: no es un RIP ni una referencia contractual de separaciones.
+- A 150 ppp un píxel mide aproximadamente 0,169 mm: una captura de página completa **no permite medir o garantizar un trap de 0,10 mm**. Se necesita una región pequeña a mayor resolución y validación posterior para estudiar detalles finos. La captura puede tardar varios segundos y esta primera consulta es síncrona; no tiene progreso ni cancelación.
+- El panel conserva una sola captura en memoria, sin escribirla en el documento o preferencias. Se invalida al cambiar documento, mesa, tinta, resolución o ajustes de color. Los clics de selección y la ampliación no fuerzan un nuevo render. No usa IA ni envía el archivo a un servicio externo.
+
+El siguiente experimento deberá detectar fronteras en estas planchas y contrastarlas con la geometría antes de convertirlas en candidatos de trapping. No se ha implementado todavía. **Aplicar trapping mantiene su límite de 80 objetos y sus restricciones actuales.**
 
 ## Revisar antes de aplicar
 
@@ -82,10 +97,13 @@ Referencias públicas de formato: [ISO 32000, espacios de color](https://pdf-iss
 ```sh
 cargo test -p vectorcraft-trapping
 cargo test -p vectorcraft-engine --test trapping
+cargo test -p vectorcraft-engine --test trapping_capture
 cargo test -p vectorcraft-ui-egui --test trapping_panel
 cargo check --target wasm32-unknown-unknown -p vectorcraft-web
 cargo xtask ci
 ```
+
+Actualización de fase 1 (2026-10-25): 26 pruebas de geometría, 24 de trapping del motor, 7 de captura (incluido un caso local opcional) y 8 de paleta. Se comprobó un trabajo SVG del usuario con más de 1.100 objetos: cuatro planchas CMYK de 2.350 × 1.625 px a 150 ppp, sin cambios al documento. Los spots de ese SVG ya estaban convertidos a colores de proceso/RGB y no se reconstruyeron. Las pruebas sintéticas verifican calado y sobreimpresión básica, dos spots de igual alternativo visual separados por identidad, imágenes alfa, muestras CMYK originales, recortes, más de 80 objetos, límites, entradas inválidas y ausencia de cambios en selección/historial/vista. Se revisaron capturas nativas del panel con imagen visible en temas claro y oscuro. No es una validación RIP ni un benchmark web.
 
 Comprobado el 2026-10-25: 26 pruebas de geometría, 24 de motor y 7 de paleta aprobadas; capturas nativas en ambos temas, comprobación WASM, formato, assets, brands y layers aprobados. `cargo xtask ci` se detiene en avisos previos de Clippy en `render/src/fx.rs` e `pdf/src/import_scan.rs`; no representa una ejecución completa de todos los tests del workspace. La comprobación específica de UI también encuentra avisos previos fuera de esta paleta (Pathfinder y thumbnail worker).
 
@@ -99,7 +117,7 @@ Capturas opcionales del panel real (requieren un adaptador gráfico disponible):
 TRAPCOLOR_SCREENSHOTS=/tmp/trapcolor-panel cargo test -p vectorcraft-ui-egui --test trapping_panel trapping_panel_visual_capture
 ```
 
-Cubren un panel con análisis y traps en tema oscuro de 340 px y claro de 280 px. Añade `KX27_GRADIENT_CAPTURE=1` para mostrar un par sólido/degradado o `KX27_IMAGE_CAPTURE=1` para sólido/imagen.
+Cubren un panel con análisis y traps en tema oscuro de 340 px y claro de 280 px. Añade `KX27_GRADIENT_CAPTURE=1` para mostrar un par sólido/degradado o `KX27_IMAGE_CAPTURE=1` para sólido/imagen. `KX27_TECHNICAL_CAPTURE=1` abre la captura experimental en lugar del análisis de contactos.
 
 ## Compilación web y GitHub Pages
 

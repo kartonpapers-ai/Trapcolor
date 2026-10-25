@@ -1,5 +1,7 @@
 > Fork de VectorCraft. Nombre en clave y alcance: [Project KX27](docs/project-kx27.md).
 
+> Project KX27 · 2026-10-25: experimental read-only ink captures compose a full artboard or region per CMYK/linked-spot plate, including embedded raster alpha and clips. Sampled preview with approximate overprint, bounded pixels and source assets; no contact detection or new trap geometry. The 80-object Apply limit and upstream parity scores are unchanged. See [capture scope](docs/trapcolor-trapping.md#captura-experimental-por-tintas-fase-1).
+
 Project KX27 adds initial **solid into opaque embedded PNG/JPEG image frames** trapping, preserving image objects and pixels. See [scope and limits](docs/trapcolor-trapping.md).
 
 Project KX27 supports **solid into opaque linear gradient** trapping at constant width, using only the solid ink in overprint. See [scope and limits](docs/trapcolor-trapping.md).
