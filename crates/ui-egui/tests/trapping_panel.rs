@@ -147,6 +147,12 @@ fn experimental_capture_is_read_only_and_the_panel_stays_available() {
     h.run_steps(4);
     assert!(h.query_by_label("Cyan · 200 × 150 px · 0.353 mm/píxel").is_none(), "edited document invalidates capture");
     h.get_by_label("Capturar tinta");
+    h.state_mut().ui.trapping.capture_dpi = 600.0;
+    h.input_mut().max_texture_side = Some(1024);
+    h.get_by_label("Capturar tinta").click();
+    h.run_steps(4);
+    assert!(h.state().ui.trapping.failed);
+    assert!(h.state().ui.trapping.message.contains("límite gráfico de 1024"));
 }
 
 #[test]

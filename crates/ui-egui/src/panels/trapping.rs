@@ -458,6 +458,14 @@ fn capture_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Setting
                             .and_then(|bytes| image::load_from_memory(&bytes).ok())
                             .map(|image| image.to_rgba8());
                         if let (Some(pixels), Some(st)) = (pixels, app.session.active()) {
+                            let limit = ui.ctx().input(|i| i.max_texture_side).max(1);
+                            if pixels.width() as usize > limit || pixels.height() as usize > limit {
+                                settings.message = format!(
+                                    "La captura supera el límite gráfico de {limit} píxeles por lado. Baja la resolución y captura de nuevo."
+                                );
+                                settings.failed = true;
+                                return;
+                            }
                             // Upload once on explicit capture. This build installs SVG loaders
                             // only, so PNGs use the same direct texture path as other panels.
                             let color =
