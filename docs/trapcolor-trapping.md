@@ -1,6 +1,6 @@
 # Project KX27: paleta de trapping
 
-Estado: captura por tintas experimental de solo lectura añadida; trapping de sólidos, spots, degradados lineales e imágenes opacas conservado, 2026-10-25. No cambia la calificación alfa del editor.
+Estado: fase 2 experimental de fronteras visibles, 2026-10-26. Se conservan la captura por tintas y el trapping de sólidos, spots, degradados lineales e imágenes opacas. No cambia la calificación alfa del editor.
 
 ## Uso
 
@@ -27,7 +27,33 @@ En **Captura por tintas · Fase 1**, elige una tinta, define los ppp y pulsa **C
 - A 150 ppp un píxel mide aproximadamente 0,169 mm: una captura de página completa **no permite medir o garantizar un trap de 0,10 mm**. Se necesita una región pequeña a mayor resolución y validación posterior para estudiar detalles finos. La captura puede tardar varios segundos y esta primera consulta es síncrona; no tiene progreso ni cancelación.
 - El panel conserva una sola captura en memoria, sin escribirla en el documento o preferencias. Se invalida al cambiar documento, mesa, tinta, resolución o ajustes de color. Los clics de selección y la ampliación no fuerzan un nuevo render. No usa IA ni envía el archivo a un servicio externo.
 
-El siguiente experimento deberá detectar fronteras en estas planchas y contrastarlas con la geometría antes de convertirlas en candidatos de trapping. No se ha implementado todavía. **Aplicar trapping mantiene su límite de 80 objetos y sus restricciones actuales.**
+La fase 2 descrita a continuación añade candidatos a partir de estas planchas. Todavía falta atribuirlos a la geometría original y decidir si requieren trapping. **Aplicar trapping mantiene su límite de 80 objetos y sus restricciones actuales.**
+
+## Fronteras visibles: fase 2
+
+Abre **Fronteras visibles · Fase 2** en la misma paleta. Comienza con **72 ppp** y **15 %** de contraste; pulsa **Detectar fronteras** sin seleccionar objetos. El mapa muestra el trabajo compuesto con candidatos rojos y un halo blanco para distinguirlos sobre tintas oscuras. **Mostrar marcas rojas** compara el original y el mapa; ampliar y desplazar solo cambia la vista del mapa. La lista de zonas muestra las tintas que cambian, diez zonas por página. Al elegir una fila se dibuja su recuadro aproximado en el mapa, sin seleccionar ni modificar el arte original.
+
+### Qué detecta
+
+`trapping.boundaries` es una consulta independiente de `trapping.analyze` y `trapping.apply`. Captura todas las planchas CMYK y las muestras spot del documento con la misma región y resolución. El detector original compara valores de tinta, no colores RGB: dos spots con el mismo alternativo visual siguen siendo dos canales distintos.
+
+En cada eje usa cinco muestras consecutivas: exige que una tinta aumente y otra disminuya al menos el contraste elegido entre los extremos. Los cambios centrales deben dominar los exteriores para descartar rampas suaves. Tres muestras internas deben contener tinta para no unir colores separados por un hueco blanco resuelto. El margen exterior de dos píxeles no se analiza. Los píxeles candidatos se agrupan por conectividad de ocho vecinos; fragmentos de menos de cuatro píxeles se descartan por defecto. Una zona conectada puede contener varios encuentros y varias tintas; no equivale a un par de objetos ni a un trap.
+
+### Contrato y límites
+
+- Consulta: `{dpi?:36..600 (72), artboard?:index (0), region?:[x0,y0,x1,y1], contrast?:5..100 (15), minPixels?:2..1000 (4)}`. Las regiones y los recuadros devueltos están en puntos del documento. Un recorte pequeño a mayor resolución se puede pedir por el comando; el panel inicial analiza la mesa activa completa.
+- Devuelve `dataBase64` (PNG compuesto), `overlayBase64` (PNG transparente de marcas), tamaño, ppp, mm/píxel, ajustes de color, planchas, `zoneCount`, `markedPixels`, `discardedPixels` y `zones:[{index,pixels,bounds,plates}]`. `index` es un número local del informe, no un ID del documento. El informe enumera solo las primeras 200 zonas en orden de escaneo y declara `zonesTruncated`; el overlay conserva **todas** las marcas retenidas, también las de zonas no enumeradas.
+- Máximo **1 MP de salida, 12 tintas totales (CMYK incluidas) y 8 MP de imágenes fuente acumulados**. Las imágenes fuente y el resto del arte heredan también las validaciones y límites de fase 1. Se incluyen conservadoramente las muestras spot y assets no utilizados en sus respectivos presupuestos. Los límites se revisan antes de renderizar cada plancha; no se baja la resolución silenciosamente. El panel verifica el límite de textura del dispositivo antes de subir ambas imágenes.
+- Se mantienen oclusores, recortes, alfa y capas imprimibles visibles, incluidas las bloqueadas. Los troqueles imprimibles visibles y los traps existentes también aparecen: no se clasifican ni excluyen automáticamente. No hay filtrado por selección ni se aplica el límite de 80 objetos a esta consulta.
+- Una sola pareja de texturas y un informe se conservan en memoria. Se invalidan al cambiar documento, mesa activa, resolución, contraste o ajustes de color. Cambiar selección, mostrar/ocultar marcas, ampliar, paginar o revisar una zona no recalcula ni modifica el documento. No se guarda el mapa en el archivo o preferencias; solo sus controles se serializan.
+
+### Qué no concluye
+
+Es un detector conservador para **revisión**, no una confirmación de conflicto ni una decisión de trapping. Omite deliberadamente tinta contra papel, cambios de una sola plancha, gradaciones suaves y fragmentos pequeños; puede perder contactos finos, bordes recortados por el margen o cambios inferiores al contraste. El aliasing puede ocultar huecos menores que un píxel; los detalles de fotografías y mezclas pueden generar falsos positivos. A 72 ppp un píxel mide 0,353 mm: el rojo, su halo y los recuadros son indicadores de pantalla, **no el ancho de un trap**.
+
+Hereda la aproximación de sobreimpresión Multiply y el renderizador de 8 bits de fase 1; no es una referencia RIP. No recupera spots convertidos a RGB/CMYK, no atribuye bordes a objetos fuente, no decide necesidad/dirección/ancho y no crea vectores. El cálculo es síncrono y repite la separación de imágenes por plancha, sin progreso ni cancelación: esta entrega no afirma una mejora de tiempos frente a un motor comercial. No usa IA ni servicios externos. **Aplicar trapping conserva sus límites y reglas actuales.**
+
+El siguiente trabajo será contrastar estas zonas con encuentros y geometría originales, antes de generar traps a partir de ellas.
 
 ## Revisar antes de aplicar
 
@@ -94,8 +120,13 @@ Referencias públicas de formato: [ISO 32000, espacios de color](https://pdf-iss
 
 ## Validación
 
+Fase 2 (2026-10-26): pasaron 77 pruebas específicas (26 geometría, 5 detector, 24 trapping del motor, 13 captura/fronteras —dos casos locales opcionales— y 9 paleta). También se aprobaron WASM, formato, assets, brands y layers; el CI general sigue detenido por avisos previos de Clippy en render/PDF y las comprobaciones enfocadas señalan solo los avisos anteriores en Layer Panel, Pathfinder y thumbnail worker. Se inspeccionaron capturas nativas claro/oscuro con el SVG local. El smoke de `vectorcraft-cli bench` antes/después conservó 1.156 nodos dibujados y 31 descartados sobre el trabajo local; los perfiles/cachés de desarrollo difirieron y los tiempos no se usan como afirmación de rendimiento.
+
+Pruebas del detector puro para intercambio brusco, rampas, papel/huecos, tinta común sin intercambio, antialiasing, fragmentos y truncado de informes; pruebas de consulta para recuadros en coordenadas de documento, oclusión, spots de igual apariencia, más de 80 objetos, imágenes CMYK, recortes y parámetros/presupuestos inválidos. El trabajo SVG del usuario se usó solo localmente: 41 zonas, 4.299 píxeles marcados y 74 descartados, a 1.128 × 780 px / 72 ppp / 15 %. Es evidencia de ejecución y conservación del documento, no validación de que esas 41 zonas requieran trap.
+
 ```sh
 cargo test -p vectorcraft-trapping
+cargo test -p vectorcraft-render --lib boundaries::tests
 cargo test -p vectorcraft-engine --test trapping
 cargo test -p vectorcraft-engine --test trapping_capture
 cargo test -p vectorcraft-ui-egui --test trapping_panel
@@ -124,3 +155,5 @@ Cubren un panel con análisis y traps en tema oscuro de 340 px y claro de 280 px
 El workflow **Project KX27 web** compila la aplicación completa con Trunk y deja un artefacto `trapcolor-web` en GitHub Actions. Los pushes a la rama de desarrollo solo generan el artefacto. Los pushes a `main` compilan y publican en GitHub Pages.
 
 Para alojarla, habilita **Settings → Pages → Source: GitHub Actions** en el repositorio. Una vez que el workflow esté en la rama principal, ejecútalo con **Run workflow** y la opción **publish** activada. La acción de despliegue devuelve la URL real. La configuración inicial de Pages requiere permisos de administración y no puede activarse con el `GITHUB_TOKEN` normal del workflow.
+
+Capturas opcionales de fase 2: `KX27_BOUNDARY_CAPTURE=1 TRAPCOLOR_SCREENSHOTS=/tmp/kx27-phase2 cargo test -p vectorcraft-ui-egui --test trapping_panel trapping_panel_visual_capture`. `KX27_BOUNDARY_CAPTURE_SVG` permite revisar un SVG propio local sin incorporarlo a las pruebas. Para generar el diagnóstico local del motor: `KX27_BOUNDARY_SVG=/ruta/propia.svg cargo test -p vectorcraft-engine --test trapping_capture optional_real_job_boundary_capture -- --nocapture`.

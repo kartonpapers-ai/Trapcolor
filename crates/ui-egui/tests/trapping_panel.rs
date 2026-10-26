@@ -87,7 +87,14 @@ fn trapping_panel_visual_capture() {
             .unwrap();
             app.run("select.all", json!({})).unwrap();
         }
-        app.run("trapping.apply", json!({})).unwrap();
+        if std::env::var("KX27_BOUNDARY_CAPTURE").is_ok() {
+            if let Ok(path) = std::env::var("KX27_BOUNDARY_CAPTURE_SVG") {
+                let bytes = std::fs::read(path).unwrap();
+                app.run("document.open", json!({"name":"user-job.svg","dataBase64":vectorcraft_format::base64_encode(&bytes)})).unwrap();
+            }
+        } else {
+            app.run("trapping.apply", json!({})).unwrap();
+        }
         let mut ready = false;
         let mut h = Harness::builder().with_size(egui::vec2(width, 1050.0)).wgpu().build_ui_state(
             move |ui, app: &mut VectorcraftApp| {
@@ -103,7 +110,11 @@ fn trapping_panel_visual_capture() {
             app,
         );
         h.run_steps(4);
-        if std::env::var("KX27_TECHNICAL_CAPTURE").is_ok() {
+        if std::env::var("KX27_BOUNDARY_CAPTURE").is_ok() {
+            h.get_by_label("Fronteras visibles · Fase 2").click();
+            h.run_steps(4);
+            h.get_by_label("Detectar fronteras").click();
+        } else if std::env::var("KX27_TECHNICAL_CAPTURE").is_ok() {
             h.get_by_label("Captura por tintas · Fase 1").click();
             h.run_steps(4);
             h.get_by_label("Capturar tinta").click();
@@ -113,6 +124,52 @@ fn trapping_panel_visual_capture() {
         h.run_steps(4);
         h.render().unwrap().save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
     }
+}
+
+#[test]
+fn visible_boundary_map_can_be_reviewed_without_editing_and_invalidates_when_needed() {
+    let app = app();
+    let before = app.session.doc().unwrap().doc.clone();
+    let selection = app.session.doc().unwrap().selection.objects.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 1600.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Fronteras visibles · Fase 2").click();
+    h.run_steps(4);
+    h.get_by_label("Detectar fronteras").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    h.get_by_label("Mostrar marcas rojas").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.boundary_show);
+    h.get_by_label_contains("Zona 1 ·").click();
+    h.run_steps(4);
+    assert!(std::sync::Arc::ptr_eq(&before, &h.state().session.doc().unwrap().doc));
+    assert_eq!(selection, h.state().session.doc().unwrap().selection.objects);
+    assert_eq!(undo, h.state().session.doc().unwrap().history.undo.len());
+    let saved = serde_json::to_value(&h.state().ui.trapping).unwrap();
+    assert!(saved.get("boundaries").is_none());
+    h.state_mut().ui.trapping.boundary_contrast = 50.0;
+    h.run_steps(4);
+    assert!(h.query_by_label("Mostrar marcas rojas").is_none(), "contrast changes invalidate the map");
+    h.get_by_label("Detectar fronteras").click();
+    h.run_steps(4);
+    h.get_by_label("Mostrar marcas rojas");
+    h.state_mut().run("shape.rectangle", json!({"x":0,"y":0,"width":5,"height":5})).unwrap();
+    h.run_steps(4);
+    assert!(h.query_by_label("Mostrar marcas rojas").is_none(), "document edits invalidate the map");
 }
 
 #[test]

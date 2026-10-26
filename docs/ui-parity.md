@@ -1,5 +1,7 @@
 # UI and interaction parity
 
+> Project KX27 · 2026-10-26: experimental visible-ink boundary candidates compare aligned process/spot captures, highlight sharp opposing ink changes and report connected review zones without editing artwork. Bounded sampling, smooth-ramp and small-fragment filtering, map/overlay toggle and zone review; no source-object attribution, trap decision, direction or vector generation. The 80-object Apply limit and upstream parity scores are unchanged. See [phase 2 scope](trapcolor-trapping.md#fronteras-visibles-fase-2).
+
 > Project KX27 · 2026-10-25: experimental read-only ink captures compose a full artboard or region per CMYK/linked-spot plate, including embedded raster alpha and clips. Sampled preview with approximate overprint, bounded pixels and source assets; no contact detection or new trap geometry. The 80-object Apply limit and upstream parity scores are unchanged. See [capture scope](trapcolor-trapping.md#captura-experimental-por-tintas-fase-1).
 
 > Project KX27 · 2026-10-25: first solid-into-image trapping for fully opaque embedded PNG/JPEG frames, using the actual affine corners and only the solid ink in overprint. Image nodes and encoded pixels are preserved; transparency, silhouettes, linked images and image/image or image/gradient contacts remain unsupported. Upstream parity scores and estimates are unchanged. See [trapping scope](trapcolor-trapping.md).

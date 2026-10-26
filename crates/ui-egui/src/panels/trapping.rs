@@ -38,6 +38,23 @@ impl std::fmt::Debug for Capture {
     }
 }
 
+struct BoundaryCapture {
+    document: Arc<Document>,
+    colors: vectorcraft_color::cms::ColorSettings,
+    dpi: f64,
+    contrast: f64,
+    artboard: usize,
+    report: Value,
+    texture: egui::TextureHandle,
+    overlay: egui::TextureHandle,
+}
+
+impl std::fmt::Debug for BoundaryCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundaryCapture").field("dpi", &self.dpi).field("contrast", &self.contrast).finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -60,6 +77,16 @@ pub struct Settings {
     pub capture_zoom: f32,
     #[serde(skip)]
     capture: Option<Arc<Capture>>,
+    pub boundary_dpi: f64,
+    pub boundary_contrast: f64,
+    pub boundary_zoom: f32,
+    pub boundary_show: bool,
+    #[serde(skip)]
+    boundaries: Option<Arc<BoundaryCapture>>,
+    #[serde(skip)]
+    boundary_page: usize,
+    #[serde(skip)]
+    boundary_selected: Option<usize>,
 }
 
 impl Default for Settings {
@@ -78,6 +105,13 @@ impl Default for Settings {
             capture_plate: 0,
             capture_zoom: 1.0,
             capture: None,
+            boundary_dpi: 72.0,
+            boundary_contrast: 15.0,
+            boundary_zoom: 1.0,
+            boundary_show: true,
+            boundaries: None,
+            boundary_page: 0,
+            boundary_selected: None,
         }
     }
 }
@@ -102,6 +136,18 @@ impl Settings {
             self.capture_zoom = 1.0;
         }
         self.capture_zoom = self.capture_zoom.clamp(1.0, 8.0);
+        if !self.boundary_dpi.is_finite() {
+            self.boundary_dpi = 72.0;
+        }
+        if !self.boundary_contrast.is_finite() {
+            self.boundary_contrast = 15.0;
+        }
+        if !self.boundary_zoom.is_finite() {
+            self.boundary_zoom = 1.0;
+        }
+        self.boundary_dpi = self.boundary_dpi.clamp(36.0, 600.0);
+        self.boundary_contrast = self.boundary_contrast.clamp(5.0, 100.0);
+        self.boundary_zoom = self.boundary_zoom.clamp(1.0, 8.0);
     }
 
     fn params(&self) -> Value {
@@ -149,6 +195,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let doc_uid = app.session.active().map(|st| st.uid);
     if settings.document != doc_uid {
         clear_capture(ui, &mut settings);
+        settings.boundaries = None;
+        settings.boundary_selected = None;
         settings.analysis = None;
         settings.message.clear();
         settings.failed = false;
@@ -161,6 +209,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let can_apply = doc_uid.is_some() && artwork >= 2;
 
     capture_section(app, ui, &mut settings);
+    boundary_section(app, ui, &mut settings);
 
     widgets::section_header(ui, "Reglas para pares nuevos");
     ui.add_enabled_ui(doc_uid.is_some(), |ui| {
@@ -412,6 +461,170 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.label("Los traps existentes conservan sus ajustes. Selecciona todo el arte que pueda tapar un encuentro. Máximo: 80 objetos y 12.000 nodos por operación.");
     });
     app.ui.trapping = settings;
+}
+
+fn boundary_textures(ui: &Ui, report: &Value) -> Result<(egui::TextureHandle, egui::TextureHandle), String> {
+    let load = |key: &str| -> Result<image::RgbaImage, String> {
+        let bytes = report[key].as_str().and_then(vectorcraft_format::base64_decode).ok_or("No se pudo leer el mapa de fronteras.")?;
+        image::load_from_memory(&bytes).map(|im| im.to_rgba8()).map_err(|e| format!("No se pudo leer el mapa: {e}"))
+    };
+    let base = load("dataBase64")?;
+    let overlay = load("overlayBase64")?;
+    let limit = ui.ctx().input(|i| i.max_texture_side).max(1);
+    if base.dimensions() != overlay.dimensions() || base.width() as usize > limit || base.height() as usize > limit {
+        return Err(format!("El mapa supera el límite gráfico de {limit} píxeles por lado o sus capas no coinciden. Baja los ppp."));
+    }
+    let texture = |name, pixels: &image::RgbaImage| {
+        let image = egui::ColorImage::from_rgba_unmultiplied([pixels.width() as usize, pixels.height() as usize], pixels.as_raw());
+        ui.ctx().load_texture(name, image, egui::TextureOptions::NEAREST)
+    };
+    Ok((texture("kx27-boundary-base", &base), texture("kx27-boundary-overlay", &overlay)))
+}
+
+fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settings) {
+    let artboard = app.session.active_index().and_then(|i| app.views.get(i)).map_or(0, |v| v.artboard);
+    let stale = settings.boundaries.as_ref().is_some_and(|c| {
+        c.dpi != settings.boundary_dpi
+            || c.contrast != settings.boundary_contrast
+            || c.artboard != artboard
+            || c.colors != vectorcraft_color::cms::active_settings()
+            || app.session.active().is_none_or(|st| !Arc::ptr_eq(&c.document, &st.doc))
+    });
+    if stale {
+        settings.boundaries = None;
+        settings.boundary_selected = None;
+        settings.message = "El documento o los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
+        settings.failed = false;
+    }
+    egui::CollapsingHeader::new("Fronteras visibles · Fase 2").show(ui, |ui| {
+        ui.label("Busca encuentros candidatos entre tintas del trabajo compuesto. No modifica el documento ni genera traps.");
+        let before = (settings.boundary_dpi, settings.boundary_contrast);
+        number(ui, "Resolución del detector", &mut settings.boundary_dpi, 36.0..=600.0, " ppp");
+        number(ui, "Contraste mínimo", &mut settings.boundary_contrast, 5.0..=100.0, " %");
+        if before != (settings.boundary_dpi, settings.boundary_contrast) {
+            settings.boundaries = None;
+            settings.boundary_selected = None;
+            settings.message = "Los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
+            settings.failed = false;
+        }
+        if ui.add_enabled(app.session.active().is_some(), egui::Button::new("Detectar fronteras")).clicked() {
+            settings.boundaries = None;
+            settings.boundary_selected = None;
+            let result =
+                app.run("trapping.boundaries", json!({"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"artboard":artboard}));
+            let result = result.and_then(|mut report| {
+                let (texture, overlay) = boundary_textures(ui, &report)?;
+                if let Some(obj) = report.as_object_mut() {
+                    obj.remove("dataBase64");
+                    obj.remove("overlayBase64");
+                }
+                let st = app.session.active().ok_or("No hay documento activo.")?;
+                Ok(BoundaryCapture {
+                    document: st.doc.clone(),
+                    colors: vectorcraft_color::cms::active_settings(),
+                    dpi: settings.boundary_dpi,
+                    contrast: settings.boundary_contrast,
+                    artboard,
+                    report,
+                    texture,
+                    overlay,
+                })
+            });
+            match result {
+                Ok(c) => {
+                    settings.boundaries = Some(Arc::new(c));
+                    settings.boundary_page = 0;
+                    settings.failed = false;
+                    settings.message = "Mapa de candidatos listo. El documento no se modificó.".into();
+                }
+                Err(e) => {
+                    settings.message = e;
+                    settings.failed = true;
+                }
+            }
+        }
+        widgets::dim_label(ui, "Experimental · Máximo 1 MP y 12 tintas. Comienza con 72 ppp; el cálculo puede tardar varios segundos.");
+        if let Some(c) = settings.boundaries.clone() {
+            let count = c.report["zoneCount"].as_u64().unwrap_or(0);
+            let label = if count == 1 { "zona candidata" } else { "zonas candidatas" };
+            ui.label(format!("{count} {label}"));
+            ui.label(format!("{} × {} px · {:.3} mm/píxel", c.report["width"], c.report["height"], c.report["pixelMm"].as_f64().unwrap_or(0.0)));
+            ui.checkbox(&mut settings.boundary_show, "Mostrar marcas rojas");
+            ui.add(egui::Slider::new(&mut settings.boundary_zoom, 1.0..=8.0).text("Ampliar mapa"));
+            let width = ui.available_width().max(1.0) * settings.boundary_zoom;
+            let ratio = c.report["height"].as_f64().unwrap_or(1.0) / c.report["width"].as_f64().unwrap_or(1.0).max(1.0);
+            egui::ScrollArea::both().id_salt("boundary-image").max_height(260.0).show(ui, |ui| {
+                let response = ui.add(egui::Image::new(&c.texture).fit_to_exact_size(egui::vec2(width, width * ratio as f32)));
+                if settings.boundary_show {
+                    ui.painter().image(
+                        c.overlay.id(),
+                        response.rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                if let Some(index) = settings.boundary_selected
+                    && let Some(zone) = c.report["zones"].as_array().and_then(|a| a.get(index))
+                {
+                    let r = &c.report["region"];
+                    let b = &zone["bounds"];
+                    if let (Some(x0), Some(y0), Some(x1), Some(y1), Some(bx0), Some(by0), Some(bx1), Some(by1)) =
+                        (r[0].as_f64(), r[1].as_f64(), r[2].as_f64(), r[3].as_f64(), b[0].as_f64(), b[1].as_f64(), b[2].as_f64(), b[3].as_f64())
+                        && x1 > x0
+                        && y1 > y0
+                    {
+                        let point = |x, y| {
+                            response.rect.min
+                                + egui::vec2(
+                                    ((x - x0) / (x1 - x0)) as f32 * response.rect.width(),
+                                    ((y - y0) / (y1 - y0)) as f32 * response.rect.height(),
+                                )
+                        };
+                        ui.painter().rect_stroke(
+                            egui::Rect::from_min_max(point(bx0, by0), point(bx1, by1)),
+                            0.0,
+                            egui::Stroke::new(2.0, Tokens::get(ui.ctx()).accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+            });
+            ui.label("Rojo = candidato para revisar. Su grosor y recuadro no representan un trap.");
+            if let Some(zones) = c.report["zones"].as_array() {
+                let pages = zones.len().div_ceil(10).max(1);
+                settings.boundary_page = settings.boundary_page.min(pages - 1);
+                if pages > 1 {
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(settings.boundary_page > 0, egui::Button::new("Anterior")).clicked() {
+                            settings.boundary_page -= 1;
+                        }
+                        ui.label(format!("{} / {pages}", settings.boundary_page + 1));
+                        if ui.add_enabled(settings.boundary_page + 1 < pages, egui::Button::new("Siguiente")).clicked() {
+                            settings.boundary_page += 1;
+                        }
+                    });
+                }
+                egui::ScrollArea::vertical().id_salt("boundary-zones").max_height(140.0).show(ui, |ui| {
+                    for (i, z) in zones.iter().enumerate().skip(settings.boundary_page * 10).take(10) {
+                        let names =
+                            z["plates"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" / ")).unwrap_or_default();
+                        if ui.selectable_label(settings.boundary_selected == Some(i), format!("Zona {} · {names}", z["index"])).clicked() {
+                            settings.boundary_selected = Some(i);
+                            settings.boundary_zoom = 1.0;
+                        }
+                    }
+                });
+            }
+            if c.report["zonesTruncated"] == true {
+                ui.label("Informe limitado a las primeras 200 zonas. El mapa incluye todas las marcas.");
+            }
+            if count == 0 {
+                ui.label("No se encontraron candidatos con estos ajustes; no garantiza ausencia de conflictos.");
+            }
+            ui.label("No confirma necesidad, dirección ni ancho. Puede omitir detalles finos y marcar textura de imágenes. No es una prueba RIP.");
+        }
+    });
+    widgets::divider(ui);
 }
 
 fn clear_capture(_ui: &Ui, settings: &mut Settings) {

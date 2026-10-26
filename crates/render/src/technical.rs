@@ -211,3 +211,65 @@ pub fn capture_plate(renderer: &mut Renderer, doc: &Document, region: Rect, dpi:
     };
     Ok(renderer.render_region_with(&separated, region, dpi / 72.0, &opts))
 }
+
+pub struct BoundaryCapture {
+    pub composite: Rendered,
+    pub analysis: crate::boundaries::Analysis,
+    pub plates: Vec<proof::Plate>,
+}
+
+/// Read-only, sampled visible-ink candidates. All plates use the same region and
+/// resolution; no document objects, selection, proof view or Apply rules are changed.
+pub fn capture_boundaries(
+    renderer: &mut Renderer,
+    doc: &Document,
+    region: Rect,
+    dpi: f64,
+    contrast: f64,
+    min_pixels: usize,
+) -> Result<BoundaryCapture, String> {
+    use crate::boundaries::{self, InkPlane};
+    let (width, height) = capture_size(region, dpi)?;
+    if u64::from(width) * u64::from(height) > boundaries::MAX_PIXELS as u64 {
+        return Err("El detector admite hasta 1 millón de píxeles. Baja los ppp o analiza una región menor.".into());
+    }
+    if !contrast.is_finite() || !(5.0..=100.0).contains(&contrast) || !(2..=1000).contains(&min_pixels) {
+        return Err("Contraste debe estar entre 5 y 100 %, y minPixels entre 2 y 1000.".into());
+    }
+    let plates = proof::plates(doc);
+    if plates.len() > boundaries::MAX_PLATES {
+        return Err("El detector admite hasta 12 tintas, incluidas CMYK y las muestras spot del documento.".into());
+    }
+    // Phase 2 repeats source decoding per plate. A smaller aggregate source-image
+    // budget keeps this synchronous experiment bounded on the browser too.
+    let mut source_pixels = 0u64;
+    for blob in doc.images.values() {
+        let reader = image::ImageReader::new(Cursor::new(blob.bytes.as_slice())).with_guessed_format().map_err(|e| e.to_string())?;
+        let (w, h) = reader.into_dimensions().map_err(|e| format!("No se pudo leer una imagen: {e}"))?;
+        source_pixels = source_pixels.saturating_add(u64::from(w) * u64::from(h));
+        if source_pixels > 8_000_000 {
+            return Err("El detector inicial admite hasta 8 MP de imágenes fuente acumulados.".into());
+        }
+    }
+    let mut planes = Vec::new();
+    for plate in &plates {
+        let image = capture_plate(renderer, doc, region, dpi, &plate.name)?;
+        let coverage = image.pixels.as_chunks::<4>().0.iter().map(|p| p[3].saturating_sub(p[0])).collect();
+        planes.push(InkPlane { name: plate.name.clone(), coverage });
+    }
+    let analysis = boundaries::detect(width, height, &planes, contrast, min_pixels)?;
+    let mut printable = doc.clone();
+    for n in &mut printable.layers {
+        print_layers(n);
+    }
+    let opts = RenderOptions {
+        background: Some([255; 4]),
+        skip_templates: true,
+        dim_templates: false,
+        precise: true,
+        overprint_preview: true,
+        ..Default::default()
+    };
+    let composite = renderer.render_region_with(&printable, region, dpi / 72.0, &opts);
+    Ok(BoundaryCapture { composite, analysis, plates })
+}

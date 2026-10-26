@@ -6,6 +6,7 @@
 //! gradients, images and text (via `vectorcraft-text` glyph outlines).
 #![forbid(unsafe_code)]
 
+pub mod boundaries;
 mod brush_fx;
 pub mod encode;
 mod freeform;

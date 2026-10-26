@@ -216,3 +216,145 @@ fn optional_real_job_plate_capture() {
     assert_eq!(vectorcraft_format::save_file(&original), vectorcraft_format::save_file(&s.doc().unwrap().doc));
     let _doc: &Document = &original;
 }
+
+fn boundary_report(s: &mut Session, p: Value) -> Value {
+    let before = s.doc().unwrap().doc.clone();
+    let undo = s.doc().unwrap().history.undo.len();
+    let selected = s.doc().unwrap().selection.objects.clone();
+    let proof = vectorcraft_render::proof::view();
+    let r = s.execute("trapping.boundaries", &p).unwrap();
+    assert!(Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+    assert_eq!(undo, s.doc().unwrap().history.undo.len());
+    assert_eq!(selected, s.doc().unwrap().selection.objects);
+    assert_eq!(proof, vectorcraft_render::proof::view());
+    for key in ["dataBase64", "overlayBase64"] {
+        let png = vectorcraft_format::base64_decode(r[key].as_str().unwrap()).unwrap();
+        let im = image::load_from_memory(&png).unwrap();
+        assert_eq!(u64::from(im.width()), r["width"].as_u64().unwrap());
+        assert_eq!(u64::from(im.height()), r["height"].as_u64().unwrap());
+    }
+    r
+}
+
+fn two_inks() -> Session {
+    let mut s = setup();
+    rect(&mut s, Rect::new(0.0, 0.0, 100.0, 100.0), Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    rect(&mut s, Rect::new(100.0, 0.0, 200.0, 100.0), Color::cmyk(0.0, 1.0, 0.0, 0.0));
+    s
+}
+
+#[test]
+fn boundary_query_marks_a_visible_exchange_and_returns_document_space_bounds() {
+    let mut s = two_inks();
+    let r = boundary_report(&mut s, json!({}));
+    assert_eq!(r["zoneCount"], 1);
+    assert_eq!(r["zones"][0]["bounds"], json!([99.0, 2.0, 101.0, 98.0]));
+    assert_eq!(r["zones"][0]["plates"], json!(["Cyan", "Magenta"]));
+    let cropped = boundary_report(&mut s, json!({"region":[80,20,120,80]}));
+    assert_eq!(cropped["width"], 40);
+    assert_eq!(cropped["height"], 60);
+    assert_eq!(cropped["zones"][0]["bounds"], json!([99.0, 22.0, 101.0, 78.0]));
+    // A covered colour boundary is not a visible boundary.
+    rect(&mut s, Rect::new(0.0, 0.0, 200.0, 100.0), Color::WHITE);
+    assert_eq!(boundary_report(&mut s, json!({}))["zoneCount"], 0);
+}
+
+#[test]
+fn boundary_query_distinguishes_spots_even_when_the_composite_colours_match() {
+    let mut s = two_inks();
+    s.execute("select.all", &json!({})).unwrap();
+    let ids = s.doc().unwrap().selection.objects.clone();
+    for (id, name) in ids.iter().zip(["Boundary Spot A", "Boundary Spot B"]) {
+        s.execute("swatch.new", &json!({"name":name,"spot":true,"color":{"model":"cmyk","c":1,"m":0,"y":0,"k":0}})).unwrap();
+        s.execute("paint.setFill", &json!({"ids":[id.0],"swatch":name})).unwrap();
+    }
+    let r = boundary_report(&mut s, json!({}));
+    assert_eq!(r["zoneCount"], 1);
+    assert_eq!(r["zones"][0]["plates"], json!(["Boundary Spot A", "Boundary Spot B"]));
+    let bytes = vectorcraft_format::base64_decode(r["dataBase64"].as_str().unwrap()).unwrap();
+    let im = image::load_from_memory(&bytes).unwrap().to_rgba8();
+    assert_eq!(im.get_pixel(20, 50), im.get_pixel(180, 50), "RGB alone cannot distinguish these inks");
+}
+
+#[test]
+fn boundary_query_ignores_internal_same_colour_segments_and_resolved_white_gaps() {
+    let mut s = setup();
+    s.edit("Many fixture paths", |d, _| {
+        for x in 0..200 {
+            let id = d.alloc_id();
+            let node = Node::path(
+                id,
+                shapes::rectangle(Rect::new(x as f64, 0.0, x as f64 + 1.0, 100.0)),
+                Appearance::basic(Paint::solid(Color::cmyk(1.0, 0.0, 0.0, 0.0)), Paint::None, 0.0),
+            );
+            d.insert(d.default_layer(), usize::MAX, node)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(boundary_report(&mut s, json!({}))["zoneCount"], 0);
+    rect(&mut s, Rect::new(100.0, 0.0, 200.0, 100.0), Color::cmyk(0.0, 1.0, 0.0, 0.0));
+    assert_eq!(boundary_report(&mut s, json!({}))["zoneCount"], 1);
+    rect(&mut s, Rect::new(100.0, 0.0, 101.0, 100.0), Color::WHITE);
+    assert_eq!(boundary_report(&mut s, json!({}))["zoneCount"], 0, "a resolved paper gap is not a contact");
+}
+
+#[test]
+fn boundary_query_reads_image_inks_and_clips_before_detecting() {
+    let mut s = setup();
+    let samples: Vec<u8> = (0..200).flat_map(|x| if x < 100 { [255, 0, 0, 0] } else { [0, 255, 0, 0] }).collect();
+    let inks = vectorcraft_doc::cmyk::Inks::new(200, 1, samples).unwrap();
+    put_image(&mut s, ImageBlob::cmyk_tiff(&inks).unwrap(), 200, 1);
+    let r = boundary_report(&mut s, json!({}));
+    assert_eq!(r["zoneCount"], 1);
+    assert_eq!(r["zones"][0]["plates"], json!(["Cyan", "Magenta"]));
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><defs><clipPath id="c"><rect width="60" height="100"/></clipPath></defs><g clip-path="url(#c)"><rect width="100" height="100" fill="#00ffff"/><rect x="100" width="100" height="100" fill="#ff00ff"/></g></svg>"##;
+    s.execute("document.open", &json!({"name":"clip.svg","dataBase64":vectorcraft_format::base64_encode(svg.as_bytes())})).unwrap();
+    assert_eq!(boundary_report(&mut s, json!({}))["zoneCount"], 0, "the clipped-away encounter must disappear");
+}
+
+#[test]
+fn boundary_query_rejects_invalid_parameters_and_budgets_without_edits() {
+    let mut s = two_inks();
+    for p in [
+        json!({"contrast":0}),
+        json!({"contrast":101}),
+        json!({"dpi":"bad"}),
+        json!({"dpi":0}),
+        json!({"minPixels":1}),
+        json!({"minPixels":1001}),
+        json!({"minPixels":2.5}),
+        json!({"region":[0,0,2000,2000]}),
+        json!({"region":[0,0,5]}),
+    ] {
+        let before = s.doc().unwrap().doc.clone();
+        let undo = s.doc().unwrap().history.undo.len();
+        assert!(s.execute("trapping.boundaries", &p).is_err(), "{p}");
+        assert!(Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+        assert_eq!(undo, s.doc().unwrap().history.undo.len());
+    }
+    for i in 0..9 {
+        s.execute("swatch.new", &json!({"name":format!("Many spots {i}"),"spot":true,"color":"#00ffff"})).unwrap();
+    }
+    assert!(s.execute("trapping.boundaries", &json!({})).unwrap_err().to_string().contains("12 tintas"));
+}
+
+#[test]
+fn optional_real_job_boundary_capture() {
+    let Ok(path) = std::env::var("KX27_BOUNDARY_SVG") else { return };
+    let output = std::env::var("KX27_BOUNDARY_OUT").unwrap_or_else(|_| "/tmp/kx27-phase2-job".into());
+    std::fs::create_dir_all(&output).unwrap();
+    let mut s = Session::new();
+    let bytes = std::fs::read(path).unwrap();
+    s.execute("document.open", &json!({"name":"user-job.svg","dataBase64":vectorcraft_format::base64_encode(&bytes)})).unwrap();
+    let started = std::time::Instant::now();
+    let mut r = boundary_report(&mut s, json!({}));
+    for (key, name) in [("dataBase64", "composite.png"), ("overlayBase64", "overlay.png")] {
+        let bytes = vectorcraft_format::base64_decode(r[key].as_str().unwrap()).unwrap();
+        std::fs::write(format!("{output}/{name}"), bytes).unwrap();
+        r.as_object_mut().unwrap().remove(key);
+    }
+    println!("{} zones; {} marked pixels; {} × {} px; {:?}", r["zoneCount"], r["markedPixels"], r["width"], r["height"], started.elapsed());
+    std::fs::write(format!("{output}/report.json"), serde_json::to_vec_pretty(&r).unwrap()).unwrap();
+    assert!(r["zoneCount"].as_u64().unwrap() > 0);
+}

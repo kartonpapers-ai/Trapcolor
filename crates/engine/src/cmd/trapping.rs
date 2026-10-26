@@ -664,6 +664,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "trapping.boundaries", "Detect Visible Ink Boundary Candidates", [], None,
+            "{dpi?:36..600 (72), artboard?:index (0), region?:[x0,y0,x1,y1] in points, contrast?:5..100 (15 percent per plate), minPixels?:2..1000 (4)} → {experimental, dpi, pixelMm, region, width, height, plates, zoneCount, zones:[{index,pixels,bounds,plates}], zonesTruncated, markedPixels, discardedPixels, dataBase64, overlayBase64, warnings}; read-only candidates from sharp opposing ink changes in aligned composed plates, no trap decisions, direction or source-object attribution; max 1 MP output, 12 plates and 8 MP source images; first 200 zones reported, all retained marks shown", has_doc, boundary_capture),
         cmd!(query "trapping.capture", "Capture Experimental Ink Plate", [], None,
             "{plate?: Cyan|Magenta|Yellow|Black|spot swatch name, dpi?: 36..600 (150), artboard?: index (0), region?: [x0,y0,x1,y1] in document points} → {experimental, plate, plates, dpi, pixelMm, region, width, height, dataBase64, warnings}; read-only sampled plate preview of the composed document, including raster images; at most 4 MP output, 32 MP / 64 MiB source images; approximate overprint, no conflict detection or trapping; independent of selection and the 80-object Apply limit", has_doc, capture),
         cmd!(query "trapping.analyze", "Analyze Trapping Contacts", [], None,
@@ -693,19 +695,7 @@ fn capture(s: &mut Session, p: &Value) -> Result<Value> {
         None => 150.0,
         Some(v) => v.as_f64().ok_or_else(|| bad(C, "dpi debe ser numérico."))?,
     };
-    let region = if let Some(v) = p.get("region") {
-        let a = v.as_array().filter(|a| a.len() == 4).ok_or_else(|| bad(C, "region debe contener [x0,y0,x1,y1]."))?;
-        let values = a.iter().map(|v| v.as_f64().ok_or_else(|| bad(C, "Las coordenadas deben ser numéricas."))).collect::<Result<Vec<_>>>()?;
-        let mut v = values.into_iter();
-        let mut next = || v.next().ok_or_else(|| bad(C, "Falta una coordenada."));
-        Rect::new(next()?, next()?, next()?, next()?)
-    } else {
-        let index = match p.get("artboard") {
-            None => 0,
-            Some(v) => v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| bad(C, "artboard debe ser un índice válido."))?,
-        };
-        doc.artboards.get(index).ok_or_else(|| bad(C, "La mesa de trabajo no existe."))?.rect
-    };
+    let region = capture_region(doc, p, C)?;
     let mut renderer = vectorcraft_render::Renderer::new();
     let image = vectorcraft_render::technical::capture_plate(&mut renderer, doc, region, dpi, plate).map_err(|e| bad(C, e))?;
     let png = image.to_png().map_err(|e| bad(C, e))?;
@@ -721,6 +711,67 @@ fn capture(s: &mut Session, p: &Value) -> Result<Value> {
             "Sobreimpresión aproximada mediante Multiply. Transparencias y mezclas siguen el renderizador de vista previa; no es una prueba RIP. Efectos y patrones requieren expandirse antes.",
             "Solo conserva spots que existan como muestras vinculadas en el documento. No recupera tintas planas convertidas a RGB o CMYK.",
             "Captura toda el área indicada, incluidas las capas imprimibles visibles bloqueadas y los traps existentes. No excluye automáticamente troqueles."
+        ]
+    }))
+}
+
+fn capture_region(doc: &Document, p: &Value, c: &str) -> Result<Rect> {
+    if let Some(v) = p.get("region") {
+        let a = v.as_array().filter(|a| a.len() == 4).ok_or_else(|| bad(c, "region debe contener [x0,y0,x1,y1]."))?;
+        let values = a.iter().map(|v| v.as_f64().ok_or_else(|| bad(c, "Las coordenadas deben ser numéricas."))).collect::<Result<Vec<_>>>()?;
+        let mut v = values.into_iter();
+        let mut next = || v.next().ok_or_else(|| bad(c, "Falta una coordenada."));
+        Ok(Rect::new(next()?, next()?, next()?, next()?))
+    } else {
+        let index = match p.get("artboard") {
+            None => 0,
+            Some(v) => v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| bad(c, "artboard debe ser un índice válido."))?,
+        };
+        Ok(doc.artboards.get(index).ok_or_else(|| bad(c, "La mesa de trabajo no existe."))?.rect)
+    }
+}
+
+fn boundary_capture(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "trapping.boundaries";
+    let doc = &s.doc()?.doc;
+    let read_number = |key: &str, default: f64| match p.get(key) {
+        None => Ok(default),
+        Some(v) => v.as_f64().ok_or_else(|| bad(C, format!("{key} debe ser numérico."))),
+    };
+    let dpi = read_number("dpi", 72.0)?;
+    let contrast = read_number("contrast", 15.0)?;
+    let min_pixels = match p.get("minPixels") {
+        None => 4,
+        Some(v) => v.as_u64().and_then(|v| usize::try_from(v).ok()).ok_or_else(|| bad(C, "minPixels debe ser un entero positivo."))?,
+    };
+    let region = capture_region(doc, p, C)?;
+    let mut renderer = vectorcraft_render::Renderer::new();
+    let result = vectorcraft_render::technical::capture_boundaries(&mut renderer, doc, region, dpi, contrast, min_pixels).map_err(|e| bad(C, e))?;
+    let zones: Vec<_> = result
+        .analysis
+        .zones
+        .iter()
+        .enumerate()
+        .map(|(i, z)| {
+            let [x0, y0, x1, y1] = z.bounds.map(|v| f64::from(v) * 72.0 / dpi);
+            json!({"index":i+1,"pixels":z.pixels,"plates":z.plates,"bounds":[region.x0+x0,region.y0+y0,region.x0+x1,region.y0+y1]})
+        })
+        .collect();
+    let plates: Vec<_> = result.plates.iter().map(|p| json!({"name":p.name,"spot":p.spot})).collect();
+    Ok(json!({
+        "experimental":true,"dpi":dpi,"contrast":contrast,"minPixels":min_pixels,"pixelMm":25.4/dpi,
+        "region":[region.x0,region.y0,region.x1,region.y1],"width":result.composite.width,"height":result.composite.height,
+        "plates":plates,"zoneCount":result.analysis.zone_count,"zonesTruncated":result.analysis.zone_count>zones.len(),"zones":zones,
+        "markedPixels":result.analysis.marked_pixels,"discardedPixels":result.analysis.discarded_pixels,
+        "dataBase64":vectorcraft_format::base64_encode(&result.composite.to_png().map_err(|e|bad(C,e))?),
+        "overlayBase64":vectorcraft_format::base64_encode(&result.analysis.overlay.to_png().map_err(|e|bad(C,e))?),
+        "colorSettings":vectorcraft_color::cms::active_settings(),
+        "warnings":[
+            "Candidatos para revisión: cambios bruscos donde aumenta una tinta y disminuye otra. No confirma necesidad, dirección ni ancho de trapping y no identifica los objetos fuente.",
+            "Ignora cambios suaves, tinta contra papel, adiciones de una sola tinta y fragmentos pequeños. Puede omitir contactos finos o producir falsos positivos en imágenes.",
+            "El muestreo omite dos píxeles del borde de la captura; los detalles y huecos menores que la resolución pueden perderse. El grosor rojo y su halo son indicadores, no traps.",
+            "Hereda la sobreimpresión aproximada y las restricciones de la captura experimental. No es una prueba RIP, no recupera spots convertidos y no excluye troqueles imprimibles ni traps existentes.",
+            "El informe detalla como máximo las primeras 200 zonas conectadas en orden de lectura. El mapa conserva todas las marcas retenidas. El cálculo es síncrono, sin progreso ni cancelación."
         ]
     }))
 }

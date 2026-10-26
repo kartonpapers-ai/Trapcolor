@@ -1,5 +1,7 @@
 > Fork de VectorCraft. Nombre en clave y alcance: [Project KX27](docs/project-kx27.md).
 
+> Project KX27 · 2026-10-26: experimental visible-ink boundary candidates compare aligned process/spot captures, highlight sharp opposing ink changes and report connected review zones without editing artwork. Bounded sampling, smooth-ramp and small-fragment filtering, map/overlay toggle and zone review; no source-object attribution, trap decision, direction or vector generation. The 80-object Apply limit and upstream parity scores are unchanged. See [phase 2 scope](docs/trapcolor-trapping.md#fronteras-visibles-fase-2).
+
 > Project KX27 · 2026-10-25: experimental read-only ink captures compose a full artboard or region per CMYK/linked-spot plate, including embedded raster alpha and clips. Sampled preview with approximate overprint, bounded pixels and source assets; no contact detection or new trap geometry. The 80-object Apply limit and upstream parity scores are unchanged. See [capture scope](docs/trapcolor-trapping.md#captura-experimental-por-tintas-fase-1).
 
 Project KX27 adds initial **solid into opaque embedded PNG/JPEG image frames** trapping, preserving image objects and pixels. See [scope and limits](docs/trapcolor-trapping.md).
