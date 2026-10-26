@@ -216,6 +216,7 @@ pub struct BoundaryCapture {
     pub composite: Rendered,
     pub analysis: crate::boundaries::Analysis,
     pub plates: Vec<proof::Plate>,
+    pub attribution: crate::sources::Attribution,
 }
 
 /// Read-only, sampled visible-ink candidates. All plates use the same region and
@@ -271,5 +272,6 @@ pub fn capture_boundaries(
         ..Default::default()
     };
     let composite = renderer.render_region_with(&printable, region, dpi / 72.0, &opts);
-    Ok(BoundaryCapture { composite, analysis, plates })
+    let attribution = crate::sources::attribute(renderer, doc, region, dpi, &analysis);
+    Ok(BoundaryCapture { composite, analysis, plates, attribution })
 }

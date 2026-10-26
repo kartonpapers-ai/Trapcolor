@@ -665,7 +665,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "trapping.boundaries", "Detect Visible Ink Boundary Candidates", [], None,
-            "{dpi?:36..600 (72), artboard?:index (0), region?:[x0,y0,x1,y1] in points, contrast?:5..100 (15 percent per plate), minPixels?:2..1000 (4)} → {experimental, dpi, pixelMm, region, width, height, plates, zoneCount, zones:[{index,pixels,bounds,plates}], zonesTruncated, markedPixels, discardedPixels, dataBase64, overlayBase64, warnings}; read-only candidates from sharp opposing ink changes in aligned composed plates, no trap decisions, direction or source-object attribution; max 1 MP output, 12 plates and 8 MP source images; first 200 zones reported, all retained marks shown", has_doc, boundary_capture),
+            "{dpi?:36..600 (72), artboard?:index (0), region?:[x0,y0,x1,y1] in points, contrast?:5..100 (15 percent per plate), minPixels?:2..1000 (4)} → {experimental, dpi, pixelMm, region, width, height, plates, zoneCount, zones:[{index,pixels,bounds,plates,attribution}], sourceObjects, zoneMapBase64, zonesTruncated, markedPixels, discardedPixels, dataBase64, overlayBase64, warnings}; read-only candidates from sharp opposing ink changes in aligned composed plates, bounded conservative opaque-solid source attribution, no trap decisions or direction; max 1 MP output, 12 plates and 8 MP source images; first 200 zones reported, all retained marks shown", has_doc, boundary_capture),
         cmd!(query "trapping.capture", "Capture Experimental Ink Plate", [], None,
             "{plate?: Cyan|Magenta|Yellow|Black|spot swatch name, dpi?: 36..600 (150), artboard?: index (0), region?: [x0,y0,x1,y1] in document points} → {experimental, plate, plates, dpi, pixelMm, region, width, height, dataBase64, warnings}; read-only sampled plate preview of the composed document, including raster images; at most 4 MP output, 32 MP / 64 MiB source images; approximate overprint, no conflict detection or trapping; independent of selection and the 80-object Apply limit", has_doc, capture),
         cmd!(query "trapping.analyze", "Analyze Trapping Contacts", [], None,
@@ -754,23 +754,49 @@ fn boundary_capture(s: &mut Session, p: &Value) -> Result<Value> {
         .enumerate()
         .map(|(i, z)| {
             let [x0, y0, x1, y1] = z.bounds.map(|v| f64::from(v) * 72.0 / dpi);
-            json!({"index":i+1,"pixels":z.pixels,"plates":z.plates,"bounds":[region.x0+x0,region.y0+y0,region.x0+x1,region.y0+y1]})
+            let attribution = result.attribution.zones.get(i).map(|a| {
+                let pairs: Vec<_> = a.pairs.iter().filter_map(|p| {
+                    let left = result.attribution.sources.get(p.left)?;
+                    let right = result.attribution.sources.get(p.right)?;
+                    Some(json!({"ids":[left.id.0,right.id.0],"samples":p.samples}))
+                }).collect();
+                json!({"status":if pairs.is_empty(){"unresolved"}else if a.unresolved>0 || a.truncated{"partial"}else{"resolved"},
+                    "pairs":pairs,"sampledProbes":a.sampled,"unresolvedProbes":a.unresolved,"pairsTruncated":a.truncated})
+            });
+            json!({"index":i+1,"pixels":z.pixels,"plates":z.plates,"bounds":[region.x0+x0,region.y0+y0,region.x0+x1,region.y0+y1],"attribution":attribution})
         })
         .collect();
     let plates: Vec<_> = result.plates.iter().map(|p| json!({"name":p.name,"spot":p.spot})).collect();
+    let used: std::collections::BTreeSet<_> = result.attribution.zones.iter().flat_map(|z| z.pairs.iter().flat_map(|p| [p.left, p.right])).collect();
+    let sources: Vec<_> = used
+        .into_iter()
+        .filter_map(|i| result.attribution.sources.get(i))
+        .map(|o| {
+            json!({"id":o.id.0,"name":o.name.chars().take(128).collect::<String>(),"plates":o.plates,
+            "bounds":[o.bounds.x0,o.bounds.y0,o.bounds.x1,o.bounds.y1]})
+        })
+        .collect();
+    let zone_map = vectorcraft_render::Rendered {
+        width: result.composite.width,
+        height: result.composite.height,
+        pixels: result.analysis.zone_map.iter().flat_map(|z| [*z, 0, 0, 255]).collect(),
+    };
     Ok(json!({
         "experimental":true,"dpi":dpi,"contrast":contrast,"minPixels":min_pixels,"pixelMm":25.4/dpi,
         "region":[region.x0,region.y0,region.x1,region.y1],"width":result.composite.width,"height":result.composite.height,
         "plates":plates,"zoneCount":result.analysis.zone_count,"zonesTruncated":result.analysis.zone_count>zones.len(),"zones":zones,
         "markedPixels":result.analysis.marked_pixels,"discardedPixels":result.analysis.discarded_pixels,
+        "sourceObjects":sources,"sourceAttributionExperimental":true,
+        "zoneMapBase64":vectorcraft_format::base64_encode(&zone_map.to_png().map_err(|e|bad(C,e))?),
         "dataBase64":vectorcraft_format::base64_encode(&result.composite.to_png().map_err(|e|bad(C,e))?),
         "overlayBase64":vectorcraft_format::base64_encode(&result.analysis.overlay.to_png().map_err(|e|bad(C,e))?),
         "colorSettings":vectorcraft_color::cms::active_settings(),
         "warnings":[
-            "Candidatos para revisión: cambios bruscos donde aumenta una tinta y disminuye otra. No confirma necesidad, dirección ni ancho de trapping y no identifica los objetos fuente.",
+            "Candidatos para revisión: cambios bruscos donde aumenta una tinta y disminuye otra. No confirma necesidad, dirección ni ancho de trapping. Relaciona muestras con sólidos opacos cuando puede atribuir ambos lados.",
             "Ignora cambios suaves, tinta contra papel, adiciones de una sola tinta y fragmentos pequeños. Puede omitir contactos finos o producir falsos positivos en imágenes.",
             "El muestreo omite dos píxeles del borde de la captura; los detalles y huecos menores que la resolución pueden perderse. El grosor rojo y su halo son indicadores, no traps.",
             "Hereda la sobreimpresión aproximada y las restricciones de la captura experimental. No es una prueba RIP, no recupera spots convertidos y no excluye troqueles imprimibles ni traps existentes.",
+            "La atribución usa un mapa temporal de identificadores y hasta 256 sondeos por zona; admite rellenos sólidos opacos sin trazo ni sobreimpresión. Los demás objetos bloquean conservadoramente su caja. Una zona puede reunir varios pares; no son contactos vectoriales confirmados.",
             "El informe detalla como máximo las primeras 200 zonas conectadas en orden de lectura. El mapa conserva todas las marcas retenidas. El cálculo es síncrono, sin progreso ni cancelación."
         ]
     }))

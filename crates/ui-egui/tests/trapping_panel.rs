@@ -96,19 +96,22 @@ fn trapping_panel_visual_capture() {
             app.run("trapping.apply", json!({})).unwrap();
         }
         let mut ready = false;
-        let mut h = Harness::builder().with_size(egui::vec2(width, 1050.0)).wgpu().build_ui_state(
-            move |ui, app: &mut VectorcraftApp| {
-                if !ready {
-                    vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
-                    egui_extras::install_image_loaders(ui.ctx());
-                    vectorcraft_ui_egui::theme::apply(ui.ctx(), theme);
-                    ready = true;
-                    return;
-                }
-                show(app, ui);
-            },
-            app,
-        );
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(width, if std::env::var("KX27_SOURCE_CAPTURE").is_ok() { 1600.0 } else { 1050.0 }))
+            .wgpu()
+            .build_ui_state(
+                move |ui, app: &mut VectorcraftApp| {
+                    if !ready {
+                        vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                        egui_extras::install_image_loaders(ui.ctx());
+                        vectorcraft_ui_egui::theme::apply(ui.ctx(), theme);
+                        ready = true;
+                        return;
+                    }
+                    show(app, ui);
+                },
+                app,
+            );
         h.run_steps(4);
         if std::env::var("KX27_BOUNDARY_CAPTURE").is_ok() {
             h.get_by_label("Fronteras visibles · Fase 2").click();
@@ -122,6 +125,10 @@ fn trapping_panel_visual_capture() {
             h.get_by_label("Analizar contactos").click();
         }
         h.run_steps(4);
+        if std::env::var("KX27_SOURCE_CAPTURE").is_ok() {
+            h.get_by_label_contains("Zona 1 ·").click();
+            h.run_steps(4);
+        }
         h.render().unwrap().save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
     }
 }
@@ -323,6 +330,7 @@ fn diagnostic_exports_current_reports_and_excludes_stale_reports_and_image_paylo
     let raw = String::from_utf8(files.borrow()[0].1.clone()).unwrap();
     assert!(!raw.contains("dataBase64"));
     assert!(!raw.contains("overlayBase64"));
+    assert!(!raw.contains("zoneMapBase64"));
     assert!(std::sync::Arc::ptr_eq(&before, &h.state().session.doc().unwrap().doc));
     assert_eq!(undo, h.state().session.doc().unwrap().history.undo.len());
     // API invocation before another UI frame must re-check all cache identities itself.
@@ -559,4 +567,54 @@ fn image_frame_analysis_and_apply_keep_the_image_and_explain_the_rule() {
     h.get_by_label("Actualizar par").click();
     h.run_steps(4);
     assert!(!h.state().ui.trapping.failed);
+}
+
+#[test]
+fn boundary_zone_selects_original_sources_and_pair_button_keeps_document_and_history() {
+    let mut app = app();
+    app.run("select.none", json!({})).unwrap();
+    let doc = app.session.doc().unwrap().doc.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    let redo = app.session.doc().unwrap().history.redo.len();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 1900.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Fronteras visibles · Fase 2").click();
+    h.run_steps(4);
+    h.get_by_label("Detectar fronteras").click();
+    h.run_steps(4);
+    assert!(h.state().session.doc().unwrap().selection.objects.is_empty());
+    let map = h.get_by_label("Mapa de fronteras visibles").rect();
+    let pos = map.min + egui::vec2(map.width() * 30.5 / 200.0, map.height() * 50.5 / 150.0);
+    h.event(egui::Event::PointerMoved(pos));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+    }
+    h.run_steps(4);
+    assert_eq!(h.state().session.doc().unwrap().selection.objects.len(), 2, "a marked map pixel selects both originals");
+    h.state_mut().run("select.none", json!({})).unwrap();
+    h.run_steps(4);
+    h.get_by_label_contains("Zona 1 ·").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.doc().unwrap().selection.objects.len(), 2);
+    h.get_by_label("Resaltar par 1").click();
+    h.run_steps(4);
+    assert_eq!(h.state().session.doc().unwrap().selection.objects.len(), 2);
+    assert!(std::sync::Arc::ptr_eq(&doc, &h.state().session.doc().unwrap().doc));
+    assert_eq!(undo, h.state().session.doc().unwrap().history.undo.len());
+    assert_eq!(redo, h.state().session.doc().unwrap().history.redo.len());
+    h.state_mut().run("shape.rectangle", json!({"x":110,"y":0,"width":10,"height":10})).unwrap();
+    h.run_steps(4);
+    assert!(h.query_by_label("Resaltar par 1").is_none(), "source references must disappear when art changes");
 }

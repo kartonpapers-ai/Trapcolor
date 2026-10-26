@@ -1,5 +1,7 @@
 # Parity with Adobe Illustrator
 
+> Project KX27 · 2026-10-26: visible boundary zones now carry bounded, conservative source-object pairs for opaque solid fills, including linked spots. A temporary hard-edge ID render respects occlusion and supported clips; unsupported compositing blocks attribution. Clicking a marked pixel or zone selects the original objects through `select.set`, with per-pair review and fresh JSON diagnostics. No trap geometry or Apply-limit changes; upstream parity scores are unchanged. See [source attribution](trapcolor-trapping.md#relacionar-zonas-con-originales-fase-3-inicial).
+
 > Project KX27 · 2026-10-26: the Trapping palette exports a versioned JSON diagnostic with controls, plates, bounded object samples and only fresh cached reports. Browser download/native save use app services; no geometry calculation, image payloads or document edits. Contact analysis also tracks colour-setting freshness. Upstream parity scores are unchanged. See [diagnostic scope](trapcolor-trapping.md#exportar-diagnóstico-json).
 
 > Project KX27 · 2026-10-26: experimental visible-ink boundary candidates compare aligned process/spot captures, highlight sharp opposing ink changes and report connected review zones without editing artwork. Bounded sampling, smooth-ramp and small-fragment filtering, map/overlay toggle and zone review; no source-object attribution, trap decision, direction or vector generation. The 80-object Apply limit and upstream parity scores are unchanged. See [phase 2 scope](trapcolor-trapping.md#fronteras-visibles-fase-2).

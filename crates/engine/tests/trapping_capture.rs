@@ -227,7 +227,7 @@ fn boundary_report(s: &mut Session, p: Value) -> Value {
     assert_eq!(undo, s.doc().unwrap().history.undo.len());
     assert_eq!(selected, s.doc().unwrap().selection.objects);
     assert_eq!(proof, vectorcraft_render::proof::view());
-    for key in ["dataBase64", "overlayBase64"] {
+    for key in ["dataBase64", "overlayBase64", "zoneMapBase64"] {
         let png = vectorcraft_format::base64_decode(r[key].as_str().unwrap()).unwrap();
         let im = image::load_from_memory(&png).unwrap();
         assert_eq!(u64::from(im.width()), r["width"].as_u64().unwrap());
@@ -357,4 +357,144 @@ fn optional_real_job_boundary_capture() {
     println!("{} zones; {} marked pixels; {} × {} px; {:?}", r["zoneCount"], r["markedPixels"], r["width"], r["height"], started.elapsed());
     std::fs::write(format!("{output}/report.json"), serde_json::to_vec_pretty(&r).unwrap()).unwrap();
     assert!(r["zoneCount"].as_u64().unwrap() > 0);
+}
+
+fn attributed_pairs(r: &Value) -> std::collections::BTreeSet<Vec<u64>> {
+    r["zones"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|z| z["attribution"]["pairs"].as_array().unwrap())
+        .map(|p| p["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect())
+        .collect()
+}
+
+#[test]
+fn source_map_attributes_only_visible_objects_and_preserves_spot_identity() {
+    let mut s = setup();
+    let hidden = rect(&mut s, Rect::new(0.0, 0.0, 200.0, 100.0), Color::cmyk(0.0, 0.0, 1.0, 0.0));
+    let a = rect(&mut s, Rect::new(0.0, 0.0, 100.0, 100.0), Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    let b = rect(&mut s, Rect::new(100.0, 0.0, 200.0, 100.0), Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    for (id, name) in [(a, "Spot A"), (b, "Spot B")] {
+        s.execute("swatch.new", &json!({"name":name,"spot":true,"color":{"model":"cmyk","c":1,"m":0,"y":0,"k":0}})).unwrap();
+        s.execute("paint.setFill", &json!({"ids":[id.0],"swatch":name})).unwrap();
+    }
+    let r = boundary_report(&mut s, json!({}));
+    assert_eq!(attributed_pairs(&r), [vec![a.0, b.0]].into());
+    assert_eq!(r["zones"][0]["attribution"]["status"], "resolved");
+    assert!(r["sourceObjects"].as_array().unwrap().iter().all(|o| o["id"] != hidden.0));
+    assert_eq!(r["sourceObjects"][0]["plates"], json!(["Spot A"]));
+    assert_eq!(r["sourceObjects"][1]["plates"], json!(["Spot B"]));
+    let cropped = boundary_report(&mut s, json!({"region":[80,20,120,80],"dpi":144}));
+    assert_eq!(attributed_pairs(&cropped), [vec![a.0, b.0]].into());
+    let bytes = vectorcraft_format::base64_decode(cropped["zoneMapBase64"].as_str().unwrap()).unwrap();
+    let map = image::load_from_memory(&bytes).unwrap().to_rgba8();
+    assert_eq!(map.get_pixel(39, 30).0[0], 1);
+    assert_eq!(map.get_pixel(10, 30).0[0], 0);
+}
+
+#[test]
+fn source_map_splits_a_connected_zone_into_multiple_object_pairs() {
+    let mut s = setup();
+    let a = rect(&mut s, Rect::new(0.0, 0.0, 100.0, 50.0), Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    let b = rect(&mut s, Rect::new(100.0, 0.0, 200.0, 100.0), Color::cmyk(0.0, 1.0, 0.0, 0.0));
+    let c = rect(&mut s, Rect::new(0.0, 50.0, 100.0, 100.0), Color::cmyk(0.0, 0.0, 1.0, 0.0));
+    let r = boundary_report(&mut s, json!({}));
+    assert_eq!(r["zoneCount"], 1);
+    assert_eq!(attributed_pairs(&r), [vec![a.0, b.0], vec![a.0, c.0], vec![b.0, c.0]].into());
+    assert!(r["zones"][0]["attribution"]["sampledProbes"].as_u64().unwrap() <= 256);
+}
+
+#[test]
+fn source_map_blocks_unsupported_occluders_instead_of_attributing_hidden_solids() {
+    for mode in ["opacity", "overprint", "gradient", "stroke", "mask"] {
+        let mut s = two_inks();
+        let id = rect(&mut s, Rect::new(0.0, 0.0, 200.0, 100.0), Color::cmyk(0.0, 0.0, 1.0, 0.0));
+        s.edit("Unsupported occluder", |d, _| {
+            let n = d.node_mut(id).unwrap();
+            match mode {
+                "opacity" => n.opacity = 0.3,
+                "overprint" => n.appearance.fill_mut().unwrap().overprint = true,
+                "stroke" => {
+                    n.appearance.stroke_mut().unwrap().paint = Paint::solid(Color::BLACK);
+                    n.appearance.stroke_mut().unwrap().width = 1.0;
+                    n.opacity = 0.3;
+                }
+                "mask" => {
+                    // A vector opacity mask contributes uncertain compositing.
+                    let mask = Node::path(
+                        NodeId(9999),
+                        shapes::rectangle(Rect::new(0.0, 0.0, 200.0, 100.0)),
+                        Appearance::basic(Paint::solid(Color::rgb(0.5, 0.5, 0.5)), Paint::None, 0.0),
+                    );
+                    n.extras_mut().mask = Some(Box::new(vectorcraft_doc::OpacityMask::new(mask, true)));
+                }
+                _ => n.opacity = 0.3,
+            }
+            Ok(())
+        })
+        .unwrap();
+        if mode == "gradient" {
+            s.execute(
+                "paint.setFill",
+                &json!({"ids":[id.0],"gradient":{"kind":"linear","stops":[{"offset":0,"color":"#ffff00"},{"offset":1,"color":"#ffffff"}]}}),
+            )
+            .unwrap();
+        }
+        let r = boundary_report(&mut s, json!({}));
+        assert!(r["zoneCount"].as_u64().unwrap() > 0, "{mode}");
+        assert!(attributed_pairs(&r).is_empty(), "{mode}: {r}");
+    }
+}
+
+#[test]
+fn source_map_respects_clips_and_more_than_eighty_objects() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><defs><clipPath id="c"><rect x="0" y="0" width="200" height="50"/></clipPath></defs><g clip-path="url(#c)"><rect width="100" height="100" fill="#00ffff"/><rect x="100" width="100" height="100" fill="#ff00ff"/></g><rect width="200" height="100" fill="#ffff00" display="none"/></svg>"##;
+    let mut s = Session::new();
+    s.execute("document.open", &json!({"name":"original.svg","dataBase64":vectorcraft_format::base64_encode(svg.as_bytes())})).unwrap();
+    for _ in 0..100 {
+        rect(&mut s, Rect::new(-20.0, -20.0, -10.0, -10.0), Color::WHITE);
+    }
+    let r = boundary_report(&mut s, json!({}));
+    assert_eq!(r["zoneCount"], 1);
+    assert_eq!(attributed_pairs(&r).len(), 1);
+    assert_eq!(r["sourceObjects"].as_array().unwrap().len(), 2);
+    assert!(r["zones"][0]["bounds"][3].as_f64().unwrap() <= 50.0);
+    // The clip path remains geometry, never an inferred source on the clipped edge.
+    assert!(r["sourceObjects"][0]["plates"].as_array().unwrap().contains(&json!("Cyan")));
+    assert!(r["sourceObjects"][1]["plates"].as_array().unwrap().contains(&json!("Magenta")));
+}
+
+#[test]
+fn source_ids_above_one_byte_and_compound_holes_keep_original_identity() {
+    let mut s = setup();
+    s.edit("Many originals", |d, _| {
+        let layer = d.default_layer();
+        for _ in 0..300 {
+            let id = d.alloc_id();
+            d.insert(
+                layer,
+                usize::MAX,
+                Node::path(
+                    id,
+                    shapes::rectangle(Rect::new(-10.0, -10.0, -5.0, -5.0)),
+                    Appearance::basic(Paint::solid(Color::WHITE), Paint::None, 0.0),
+                ),
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let a = rect(&mut s, Rect::new(0.0, 0.0, 100.0, 100.0), Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    let b = rect(&mut s, Rect::new(100.0, 0.0, 200.0, 100.0), Color::cmyk(0.0, 1.0, 0.0, 0.0));
+    assert_eq!(attributed_pairs(&boundary_report(&mut s, json!({}))), [vec![a.0, b.0]].into());
+    // A filled hole shows its lower source; it must not be attributed to the ring
+    // merely because it lies inside the ring's bounding rectangle.
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="#ff00ff"/><path fill="#00ffff" fill-rule="evenodd" d="M10 10H190V90H10Z M60 30H140V70H60Z"/></svg>"##;
+    s.execute("document.open", &json!({"name":"hole.svg","dataBase64":vectorcraft_format::base64_encode(svg.as_bytes())})).unwrap();
+    let r = boundary_report(&mut s, json!({}));
+    assert_eq!(r["zoneCount"], 2);
+    assert_eq!(r["sourceObjects"].as_array().unwrap().len(), 2);
+    assert_eq!(attributed_pairs(&r).len(), 1);
+    assert!(r["zones"].as_array().unwrap().iter().all(|z| !z["attribution"]["pairs"].as_array().unwrap().is_empty()));
 }

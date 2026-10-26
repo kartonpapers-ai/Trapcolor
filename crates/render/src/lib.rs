@@ -17,6 +17,7 @@ mod ink;
 mod live;
 mod lru;
 mod paint;
+pub mod sources;
 pub mod technical;
 pub use paint::decode_failures;
 mod pattern;

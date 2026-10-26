@@ -48,6 +48,8 @@ struct BoundaryCapture {
     report: Value,
     texture: egui::TextureHandle,
     overlay: egui::TextureHandle,
+    zone_map: Vec<u8>,
+    source_labels: std::collections::BTreeMap<u64, String>,
 }
 
 impl std::fmt::Debug for BoundaryCapture {
@@ -518,6 +520,7 @@ fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
             if let Some(obj) = report.as_object_mut() {
                 obj.remove("dataBase64");
                 obj.remove("overlayBase64");
+                obj.remove("zoneMapBase64");
             }
             json!({"status":"current","report":report})
         } else {
@@ -661,22 +664,81 @@ pub(crate) fn export_diagnostic(app: &mut VectorcraftApp, p: &Value) -> Result<V
     Ok(json!({"path":path,"bytes":bytes.len(),"schemaVersion":1}))
 }
 
-fn boundary_textures(ui: &Ui, report: &Value) -> Result<(egui::TextureHandle, egui::TextureHandle), String> {
+fn boundary_textures(ui: &Ui, report: &Value) -> Result<(egui::TextureHandle, egui::TextureHandle, Vec<u8>), String> {
     let load = |key: &str| -> Result<image::RgbaImage, String> {
         let bytes = report[key].as_str().and_then(vectorcraft_format::base64_decode).ok_or("No se pudo leer el mapa de fronteras.")?;
         image::load_from_memory(&bytes).map(|im| im.to_rgba8()).map_err(|e| format!("No se pudo leer el mapa: {e}"))
     };
     let base = load("dataBase64")?;
     let overlay = load("overlayBase64")?;
+    let zones = load("zoneMapBase64")?;
     let limit = ui.ctx().input(|i| i.max_texture_side).max(1);
-    if base.dimensions() != overlay.dimensions() || base.width() as usize > limit || base.height() as usize > limit {
+    if base.dimensions() != zones.dimensions()
+        || base.dimensions() != overlay.dimensions()
+        || base.width() as usize > limit
+        || base.height() as usize > limit
+    {
         return Err(format!("El mapa supera el límite gráfico de {limit} píxeles por lado o sus capas no coinciden. Baja los ppp."));
     }
     let texture = |name, pixels: &image::RgbaImage| {
         let image = egui::ColorImage::from_rgba_unmultiplied([pixels.width() as usize, pixels.height() as usize], pixels.as_raw());
         ui.ctx().load_texture(name, image, egui::TextureOptions::NEAREST)
     };
-    Ok((texture("kx27-boundary-base", &base), texture("kx27-boundary-overlay", &overlay)))
+    Ok((texture("kx27-boundary-base", &base), texture("kx27-boundary-overlay", &overlay), zones.pixels().map(|p| p.0[0]).collect()))
+}
+
+/// Exact reported-zone pixels plus a two-pixel picking tolerance, never bounding-box hits.
+fn zone_at(map: &[u8], w: usize, h: usize, x: i64, y: i64) -> Option<usize> {
+    let (mut best, mut distance, mut ambiguous) = (None, i64::MAX, false);
+    for dy in -2i64..=2 {
+        for dx in -2i64..=2 {
+            let (px, py) = (x + dx, y + dy);
+            if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 {
+                continue;
+            }
+            let Some(&z) = map.get(py as usize * w + px as usize).filter(|z| **z > 0) else {
+                continue;
+            };
+            let d = dx * dx + dy * dy;
+            if d < distance {
+                best = Some(z as usize - 1);
+                distance = d;
+                ambiguous = false;
+            } else if d == distance && best != Some(z as usize - 1) {
+                ambiguous = true;
+            }
+        }
+    }
+    if ambiguous { None } else { best }
+}
+
+fn choose_zone(app: &mut VectorcraftApp, settings: &mut Settings, c: &BoundaryCapture, index: usize) {
+    let Some(zone) = c.report["zones"].as_array().and_then(|a| a.get(index)) else {
+        return;
+    };
+    settings.boundary_selected = Some(index);
+    let ids: std::collections::BTreeSet<_> = zone["attribution"]["pairs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["ids"].as_array().into_iter().flatten())
+        .filter_map(Value::as_u64)
+        .collect();
+    if ids.is_empty() {
+        settings.failed = false;
+        settings.message = "Zona sin pareja atribuible. Revisa el detalle del mapa.".into();
+    } else {
+        match app.run("select.set", json!({"ids":ids})) {
+            Ok(_) => {
+                settings.failed = false;
+                settings.message = "Objetos originales resaltados. No se modificó el arte.".into();
+            }
+            Err(e) => {
+                settings.failed = true;
+                settings.message = e;
+            }
+        }
+    }
 }
 
 fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settings) {
@@ -695,7 +757,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
         settings.failed = false;
     }
     egui::CollapsingHeader::new("Fronteras visibles · Fase 2").show(ui, |ui| {
-        ui.label("Busca encuentros candidatos entre tintas del trabajo compuesto. No modifica el documento ni genera traps.");
+        ui.label("Detecta encuentros entre tintas. Elige una zona para resaltar los sólidos originales relacionados.");
         let before = (settings.boundary_dpi, settings.boundary_contrast);
         number(ui, "Resolución del detector", &mut settings.boundary_dpi, 36.0..=600.0, " ppp");
         number(ui, "Contraste mínimo", &mut settings.boundary_contrast, 5.0..=100.0, " %");
@@ -711,11 +773,22 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
             let result =
                 app.run("trapping.boundaries", json!({"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"artboard":artboard}));
             let result = result.and_then(|mut report| {
-                let (texture, overlay) = boundary_textures(ui, &report)?;
+                let (texture, overlay, zone_map) = boundary_textures(ui, &report)?;
                 if let Some(obj) = report.as_object_mut() {
                     obj.remove("dataBase64");
                     obj.remove("overlayBase64");
+                    obj.remove("zoneMapBase64");
                 }
+                let source_labels = report["sourceObjects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|o| {
+                        let id = o["id"].as_u64()?;
+                        let inks = o["plates"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" + ");
+                        Some((id, format!("{} · {inks}", o["name"].as_str().unwrap_or("Objeto"))))
+                    })
+                    .collect();
                 let st = app.session.active().ok_or("No hay documento activo.")?;
                 Ok(BoundaryCapture {
                     document: st.doc.clone(),
@@ -726,6 +799,8 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                     report,
                     texture,
                     overlay,
+                    zone_map,
+                    source_labels,
                 })
             });
             match result {
@@ -752,7 +827,26 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
             let width = ui.available_width().max(1.0) * settings.boundary_zoom;
             let ratio = c.report["height"].as_f64().unwrap_or(1.0) / c.report["width"].as_f64().unwrap_or(1.0).max(1.0);
             egui::ScrollArea::both().id_salt("boundary-image").max_height(260.0).show(ui, |ui| {
-                let response = ui.add(egui::Image::new(&c.texture).fit_to_exact_size(egui::vec2(width, width * ratio as f32)));
+                let response = ui
+                    .add(
+                        egui::Image::new(&c.texture)
+                            .alt_text("Mapa de fronteras visibles")
+                            .fit_to_exact_size(egui::vec2(width, width * ratio as f32))
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Haz clic sobre una frontera marcada para revisar sus objetos originales.");
+                if response.clicked()
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    let w = c.report["width"].as_u64().unwrap_or(0) as usize;
+                    let h = c.report["height"].as_u64().unwrap_or(0) as usize;
+                    let x = ((pos.x - response.rect.left()) / response.rect.width() * w as f32).floor() as i64;
+                    let y = ((pos.y - response.rect.top()) / response.rect.height() * h as f32).floor() as i64;
+                    if let Some(index) = zone_at(&c.zone_map, w, h, x, y) {
+                        choose_zone(app, settings, &c, index);
+                        settings.boundary_page = index / 10;
+                    }
+                }
                 if settings.boundary_show {
                     ui.painter().image(
                         c.overlay.id(),
@@ -787,7 +881,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                     }
                 }
             });
-            ui.label("Rojo = candidato para revisar. Su grosor y recuadro no representan un trap.");
+            ui.label("Rojo = candidato. Pulsa una marca o elige una zona de la lista; se resaltan sus objetos atribuibles en el documento.");
             if let Some(zones) = c.report["zones"].as_array() {
                 let pages = zones.len().div_ceil(10).max(1);
                 settings.boundary_page = settings.boundary_page.min(pages - 1);
@@ -807,11 +901,47 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                         let names =
                             z["plates"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" / ")).unwrap_or_default();
                         if ui.selectable_label(settings.boundary_selected == Some(i), format!("Zona {} · {names}", z["index"])).clicked() {
-                            settings.boundary_selected = Some(i);
-                            settings.boundary_zoom = 1.0;
+                            choose_zone(app, settings, &c, i);
                         }
                     }
                 });
+            }
+            if let Some(index) = settings.boundary_selected
+                && let Some(zone) = c.report["zones"].as_array().and_then(|a| a.get(index))
+            {
+                ui.strong(format!("Objetos de la zona {}", index + 1));
+                let attribution = &zone["attribution"];
+                let pairs = attribution["pairs"].as_array();
+                let count = pairs.map_or(0, Vec::len);
+                if count == 0 {
+                    ui.label("Sin pareja atribuible. Puede haber transparencia, sobreimpresión, imágenes o detalles menores que el muestreo.");
+                } else {
+                    let summary =
+                        if count == 1 { "1 par de sólidos encontrado".to_string() } else { format!("{count} pares de sólidos encontrados") };
+                    ui.label(format!("{summary}. Atribución por muestreo; falta comprobar el contacto con sus curvas."));
+                    if attribution["status"] == "partial" {
+                        ui.label("Atribución parcial: algunas muestras no pudieron relacionarse con dos sólidos.");
+                    }
+                    egui::ScrollArea::vertical().id_salt("boundary-source-pairs").max_height(160.0).show(ui, |ui| {
+                        for (pair_index, pair) in pairs.into_iter().flatten().enumerate() {
+                            let names: Vec<_> =
+                                pair["ids"].as_array().into_iter().flatten().filter_map(|id| c.source_labels.get(&id.as_u64()?).cloned()).collect();
+                            ui.label(names.join(" ↔ "));
+                            if ui.button(format!("Resaltar par {}", pair_index + 1)).clicked() {
+                                match app.run("select.set", json!({"ids":pair["ids"]})) {
+                                    Ok(_) => {
+                                        settings.failed = false;
+                                        settings.message = "Objetos originales resaltados. No se modificó el arte.".into();
+                                    }
+                                    Err(e) => {
+                                        settings.failed = true;
+                                        settings.message = e;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
             }
             if c.report["zonesTruncated"] == true {
                 ui.label("Informe limitado a las primeras 200 zonas. El mapa incluye todas las marcas.");
@@ -933,4 +1063,21 @@ fn capture_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Setting
         }
     });
     widgets::divider(ui);
+}
+
+#[cfg(test)]
+mod source_picking_tests {
+    use super::zone_at;
+    #[test]
+    fn picks_marked_pixels_and_rejects_empty_boxes_and_equal_distance_zones() {
+        let mut map = vec![0u8; 100];
+        map[22] = 1;
+        map[26] = 2;
+        assert_eq!(zone_at(&map, 10, 10, 2, 2), Some(0));
+        assert_eq!(zone_at(&map, 10, 10, 3, 2), Some(0));
+        assert_eq!(zone_at(&map, 10, 10, 4, 2), None);
+        assert_eq!(zone_at(&map, 10, 10, 6, 2), Some(1));
+        assert_eq!(zone_at(&map, 10, 10, 8, 8), None);
+        assert_eq!(zone_at(&map, 10, 10, -4, 0), None);
+    }
 }

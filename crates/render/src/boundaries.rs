@@ -14,11 +14,19 @@ pub struct InkPlane {
 }
 
 #[derive(Debug)]
+pub struct Probe {
+    /// Five positions across a detected horizontal/vertical exchange.
+    pub positions: [usize; 5],
+}
+
+#[derive(Debug)]
 pub struct Zone {
     pub pixels: usize,
     /// Pixel rectangle, right and bottom exclusive. Not a source object or a trap width.
     pub bounds: [u32; 4],
     pub plates: Vec<String>,
+    /// Bounded, evenly spaced evidence from the actual component, not its box.
+    pub probes: Vec<Probe>,
 }
 
 pub struct Analysis {
@@ -27,6 +35,8 @@ pub struct Analysis {
     pub zone_count: usize,
     pub marked_pixels: usize,
     pub discarded_pixels: usize,
+    /// 1-based reported zone at retained pixels; zero = no selectable reported zone.
+    pub zone_map: Vec<u8>,
 }
 
 /// A sharp transition must trade inks: at least one plate increases and another
@@ -77,11 +87,16 @@ pub fn detect(width: u32, height: u32, planes: &[InkPlane], contrast: f64, min_p
     let threshold = (contrast * 255.0 / 100.0).round() as i16;
     let mut changes = vec![0u16; n];
     let mut mask = vec![0u8; n];
+    let mut axes = vec![0u8; n];
+    let mut zone_map = vec![0u8; n];
     for y in 2..h.saturating_sub(2) {
         for x in 2..w.saturating_sub(2) {
             let i = y * w + x;
             let horizontal = exchange(planes, [i - 2, i - 1, i, i + 1, i + 2], threshold);
             let vertical = exchange(planes, [i - 2 * w, i - w, i, i + w, i + 2 * w], threshold);
+            if let Some(axis) = axes.get_mut(i) {
+                *axis = u8::from(horizontal != 0) | (u8::from(vertical != 0) << 1);
+            }
             let bits = horizontal | vertical;
             if let (Some(m), Some(c)) = (mask.get_mut(i), changes.get_mut(i)) {
                 *m = u8::from(bits != 0);
@@ -138,7 +153,24 @@ pub fn detect(width: u32, height: u32, planes: &[InkPlane], contrast: f64, min_p
         }
         if zones.len() < MAX_ZONES {
             let plates = planes.iter().enumerate().filter(|(i, _)| bits & (1u16 << i) != 0).map(|(_, p)| p.name.clone()).collect();
-            zones.push(Zone { pixels: component.len(), bounds, plates });
+            let mut probes = Vec::new();
+            let stride = component.len().div_ceil(128).max(1);
+            for (sample, &i) in component.iter().enumerate() {
+                if let Some(z) = zone_map.get_mut(i) {
+                    *z = zone_count as u8;
+                }
+                if sample % stride != 0 {
+                    continue;
+                }
+                let axis = axes.get(i).copied().unwrap_or(0);
+                if axis & 1 != 0 {
+                    probes.push(Probe { positions: [i - 2, i - 1, i, i + 1, i + 2] });
+                }
+                if axis & 2 != 0 {
+                    probes.push(Probe { positions: [i - 2 * w, i - w, i, i + w, i + 2 * w] });
+                }
+            }
+            zones.push(Zone { pixels: component.len(), bounds, plates, probes });
         }
     }
     let mut pixels = vec![0; n * 4];
@@ -165,7 +197,7 @@ pub fn detect(width: u32, height: u32, planes: &[InkPlane], contrast: f64, min_p
             });
         }
     }
-    Ok(Analysis { overlay: Rendered { width, height, pixels }, zones, zone_count, marked_pixels, discarded_pixels })
+    Ok(Analysis { overlay: Rendered { width, height, pixels }, zones, zone_count, marked_pixels, discarded_pixels, zone_map })
 }
 
 #[cfg(test)]
@@ -266,5 +298,7 @@ mod tests {
         assert!(a.marked_pixels > a.zones.iter().map(|z| z.pixels).sum::<usize>());
         let bottom = (386 * 400 + 386) * 4;
         assert_eq!(&a.overlay.pixels[bottom..bottom + 4], &[255, 32, 32, 255]);
+        assert_eq!(a.zone_map[bottom / 4], 0, "unreported zones are never picked as another zone");
+        assert!(a.zones.iter().all(|z| z.probes.len() <= 256));
     }
 }
