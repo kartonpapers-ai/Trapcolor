@@ -1,5 +1,7 @@
 # Architecture
 
+> Project KX27 · 2026-10-26: the Trapping palette exports a versioned JSON diagnostic with controls, plates, bounded object samples and only fresh cached reports. Browser download/native save use app services; no geometry calculation, image payloads or document edits. Contact analysis also tracks colour-setting freshness. Upstream parity scores are unchanged. See [diagnostic scope](trapcolor-trapping.md#exportar-diagnóstico-json).
+
 > Project KX27 · 2026-10-26: experimental visible-ink boundary candidates compare aligned process/spot captures, highlight sharp opposing ink changes and report connected review zones without editing artwork. Bounded sampling, smooth-ramp and small-fragment filtering, map/overlay toggle and zone review; no source-object attribution, trap decision, direction or vector generation. The 80-object Apply limit and upstream parity scores are unchanged. See [phase 2 scope](trapcolor-trapping.md#fronteras-visibles-fase-2).
 
 > Project KX27 · 2026-10-25: experimental read-only ink captures compose a full artboard or region per CMYK/linked-spot plate, including embedded raster alpha and clips. Sampled preview with approximate overprint, bounded pixels and source assets; no contact detection or new trap geometry. The 80-object Apply limit and upstream parity scores are unchanged. See [capture scope](trapcolor-trapping.md#captura-experimental-por-tintas-fase-1).

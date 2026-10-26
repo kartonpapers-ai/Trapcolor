@@ -721,6 +721,12 @@ pub const UI_COMMANDS: &[(&str, &str, &str, &str)] = &[
         "{path?, scope?: selection|all (default selection), …css.selection options} css.export written to path, else a picked file (the web downloads it), with the pictures of rasterized art next to it (CSS Properties panel: Export Selected CSS…, Export All…) → {path, rules, images: [path…]}",
     ),
     (
+        "trapping.exportDiagnostic",
+        "Exportar diagnóstico (.json)",
+        "",
+        "{path?} export current trapping controls, plates, bounded object samples and fresh cached contact/capture/boundary reports as a versioned diagnostic JSON; no geometry calculation, images or document edits; path gains .json when needed, otherwise a native save dialog or browser download → {path, bytes, schemaVersion}",
+    ),
+    (
         "file.print",
         "Print…",
         "Cmd+P",
@@ -1409,6 +1415,7 @@ pub fn run_ui_command(app: &mut VectorcraftApp, id: &str, p: &Value) -> Option<R
         }),
         "css.copy" => crate::panels::css_properties::copy(app, p),
         "css.exportFile" => crate::panels::css_properties::export_file(app, p),
+        "trapping.exportDiagnostic" => crate::panels::trapping::export_diagnostic(app, p),
         // File → Print…: its dialog; with params, print (or save the job as a PDF) without it.
         "file.print" if p.as_object().is_none_or(|o| o.is_empty()) => crate::dialogs::print::open(app),
         "file.print" => crate::print::run(app, p),
@@ -1996,6 +2003,7 @@ pub fn enabled(app: &VectorcraftApp, id: &str) -> bool {
         "file.saveForWeb" | "file.saveForWeb.browser" => app.session.active().is_some(),
         "file.exportSelection" => app.session.active().is_some_and(|d| !d.selection.is_empty()),
         "css.copy" | "css.exportFile" => app.session.active().is_some(),
+        "trapping.exportDiagnostic" => app.session.active().is_some(),
         "print.printerSetup" => app.services.print.as_ref().is_some_and(|s| s.has_setup()),
         "plugin.dialog" => app.session.active().is_some(),
         "ui.perspectiveGridDialog" | "ui.savePerspectivePreset" => app.session.active().is_some(),

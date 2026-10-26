@@ -212,6 +212,175 @@ fn experimental_capture_is_read_only_and_the_panel_stays_available() {
     assert!(h.state().ui.trapping.message.contains("límite gráfico de 1024"));
 }
 
+type DiagnosticFiles = std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>;
+
+fn diagnostic_download(app: &mut VectorcraftApp) -> DiagnosticFiles {
+    let files = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let copy = files.clone();
+    app.services.download = Some(Box::new(move |name, bytes| copy.borrow_mut().push((name.to_string(), bytes.to_vec()))));
+    files
+}
+
+#[test]
+fn diagnostic_json_download_preserves_document_selection_and_original_error() {
+    let mut app = app();
+    let files = diagnostic_download(&mut app);
+    let before = app.session.doc().unwrap().doc.clone();
+    let selection = app.session.doc().unwrap().selection.objects.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    app.ui.trapping.message = "Prueba de error original".into();
+    app.ui.trapping.failed = true;
+    app.run("trapping.exportDiagnostic", json!({})).unwrap();
+    let files = files.borrow();
+    assert_eq!(files.len(), 1);
+    assert!(files[0].0.ends_with("-trapping.json"));
+    let r: serde_json::Value = serde_json::from_slice(&files[0].1).unwrap();
+    assert_eq!(r["format"], "kx27-trapping-diagnostic");
+    assert_eq!(r["schemaVersion"], 1);
+    assert_eq!(r["panelStatus"]["failed"], true);
+    assert_eq!(r["panelStatus"]["message"], "Prueba de error original");
+    assert_eq!(r["objects"]["samples"].as_array().unwrap().len(), 2);
+    assert_eq!(r["objects"]["samples"][0]["paints"][0]["paint"]["color"]["model"], "rgb");
+    assert_eq!(r["analyses"]["boundaries"]["status"], "notAvailable");
+    assert_eq!(r["fullGeometryIncluded"], false);
+    assert_eq!(r["imageBytesIncluded"], false);
+    assert!(std::sync::Arc::ptr_eq(&before, &app.session.doc().unwrap().doc));
+    assert_eq!(selection, app.session.doc().unwrap().selection.objects);
+    assert_eq!(undo, app.session.doc().unwrap().history.undo.len());
+    assert!(app.ui.trapping.failed);
+    assert_eq!(app.ui.trapping.message, "Prueba de error original");
+}
+
+#[test]
+fn diagnostic_json_includes_linked_spots_and_handles_file_extensions_and_cancel() {
+    let mut app = app();
+    let id = app.session.doc().unwrap().selection.objects[0].0;
+    app.run("swatch.new", json!({"name":"Spot Test","spot":true,"color":{"model":"lab","l":55,"a":20,"b":30}})).unwrap();
+    app.run("paint.setFill", json!({"ids":[id],"swatch":"Spot Test","tint":40})).unwrap();
+    let files = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, Vec<u8>)>::new()));
+    let copy = files.clone();
+    app.services.write = Some(Box::new(move |path, bytes| {
+        copy.borrow_mut().push((path.to_string(), bytes.to_vec()));
+        Ok(())
+    }));
+    app.services.pick_save = Some(Box::new(|pick| {
+        assert!(pick.name.ends_with("-trapping.json"));
+        Some("/tmp/art.svg".into())
+    }));
+    let before = app.session.doc().unwrap().doc.clone();
+    app.run("trapping.exportDiagnostic", json!({})).unwrap();
+    assert_eq!(files.borrow()[0].0, "/tmp/art.svg.json", "never overwrite a picked source document");
+    let r: serde_json::Value = serde_json::from_slice(&files.borrow()[0].1).unwrap();
+    assert!(r["plates"].as_array().unwrap().iter().any(|p| p["name"] == "Spot Test" && p["spot"] == true));
+    assert!(r["objects"]["samples"].as_array().unwrap().iter().any(|o| o["paints"][0]["paint"]["swatch"] == "Spot Test"));
+    app.run("trapping.exportDiagnostic", json!({"path":"/tmp/check"})).unwrap();
+    assert_eq!(files.borrow()[1].0, "/tmp/check.json");
+    app.services.pick_save = Some(Box::new(|_| None));
+    assert!(app.run("trapping.exportDiagnostic", json!({})).is_err());
+    assert_eq!(files.borrow().len(), 2);
+    assert!(app.run("trapping.exportDiagnostic", json!({"path":123})).is_err());
+    assert!(app.run("trapping.exportDiagnostic", json!({"path":""})).is_err());
+    assert!(std::sync::Arc::ptr_eq(&before, &app.session.doc().unwrap().doc));
+}
+
+#[test]
+fn diagnostic_exports_current_reports_and_excludes_stale_reports_and_image_payloads() {
+    let mut app = app();
+    let files = diagnostic_download(&mut app);
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 2000.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Analizar contactos").click();
+    h.run_steps(4);
+    h.get_by_label("Captura por tintas · Fase 1").click();
+    h.run_steps(4);
+    h.get_by_label("Capturar tinta").click();
+    h.run_steps(4);
+    h.get_by_label("Fronteras visibles · Fase 2").click();
+    h.run_steps(4);
+    h.get_by_label("Detectar fronteras").click();
+    h.run_steps(4);
+    let before = h.state().session.doc().unwrap().doc.clone();
+    let undo = h.state().session.doc().unwrap().history.undo.len();
+    h.get_by_label("Exportar diagnóstico (.json)").click();
+    h.run_steps(4);
+    let r: serde_json::Value = serde_json::from_slice(&files.borrow()[0].1).unwrap();
+    for kind in ["contacts", "capture", "boundaries"] {
+        assert_eq!(r["analyses"][kind]["status"], "current", "{kind}");
+    }
+    assert!(r["analyses"]["boundaries"]["report"]["zoneCount"].as_u64().unwrap() > 0);
+    let raw = String::from_utf8(files.borrow()[0].1.clone()).unwrap();
+    assert!(!raw.contains("dataBase64"));
+    assert!(!raw.contains("overlayBase64"));
+    assert!(std::sync::Arc::ptr_eq(&before, &h.state().session.doc().unwrap().doc));
+    assert_eq!(undo, h.state().session.doc().unwrap().history.undo.len());
+    // API invocation before another UI frame must re-check all cache identities itself.
+    h.state_mut().run("shape.rectangle", json!({"x":0,"y":0,"width":5,"height":5})).unwrap();
+    h.state_mut().run("trapping.exportDiagnostic", json!({})).unwrap();
+    let r: serde_json::Value = serde_json::from_slice(&files.borrow()[1].1).unwrap();
+    for kind in ["contacts", "capture", "boundaries"] {
+        assert_eq!(r["analyses"][kind]["status"], "stale", "{kind}");
+        assert!(r["analyses"][kind]["report"].is_null());
+    }
+}
+
+#[test]
+fn diagnostic_export_rejects_writer_failure_and_missing_document() {
+    let mut app = app();
+    let before = app.session.doc().unwrap().doc.clone();
+    app.services.write = Some(Box::new(|_, _| Err("writer test failure".into())));
+    assert!(app.run("trapping.exportDiagnostic", json!({"path":"/tmp/diagnostic.json"})).unwrap_err().contains("writer test failure"));
+    assert!(std::sync::Arc::ptr_eq(&before, &app.session.doc().unwrap().doc));
+    let mut empty = VectorcraftApp::new(Session::new(), Default::default());
+    assert!(empty.run("trapping.exportDiagnostic", json!({"path":"/tmp/none.json"})).is_err());
+}
+
+#[test]
+fn diagnostic_stays_available_after_a_real_eighty_object_rejection_and_bounds_samples() {
+    let mut app = app();
+    let files = diagnostic_download(&mut app);
+    app.session
+        .edit("Diagnostic fixture", |d, _| {
+            for i in 0..220 {
+                let id = d.alloc_id();
+                let x = f64::from(i);
+                let path = vectorcraft_geom::shapes::rectangle(vectorcraft_geom::Rect::new(x, 0.0, x + 1.0, 10.0));
+                let appearance = vectorcraft_doc::Appearance::basic(
+                    vectorcraft_color::Paint::solid(vectorcraft_color::Color::cmyk(1.0, 0.0, 0.0, 0.0)),
+                    vectorcraft_color::Paint::None,
+                    0.0,
+                );
+                d.insert(d.default_layer(), usize::MAX, vectorcraft_doc::Node::path(id, path, appearance))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    app.run("select.all", json!({})).unwrap();
+    let error = app.run("trapping.apply", json!({})).unwrap_err();
+    assert!(error.contains("80"));
+    app.ui.trapping.message = error;
+    app.ui.trapping.failed = true;
+    let before = app.session.doc().unwrap().doc.clone();
+    app.run("trapping.exportDiagnostic", json!({})).unwrap();
+    let r: serde_json::Value = serde_json::from_slice(&files.borrow()[0].1).unwrap();
+    assert_eq!(r["objects"]["samples"].as_array().unwrap().len(), 200);
+    assert_eq!(r["objects"]["samplesTruncated"], true);
+    assert_eq!(r["panelStatus"]["failed"], true);
+    assert!(r["panelStatus"]["message"].as_str().unwrap().contains("80"));
+    assert!(std::sync::Arc::ptr_eq(&before, &app.session.doc().unwrap().doc));
+}
+
 #[test]
 fn spot_names_remain_readable_with_only_the_trap_selected() {
     let mut app = app();

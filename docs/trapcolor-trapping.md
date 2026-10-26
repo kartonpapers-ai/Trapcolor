@@ -1,6 +1,6 @@
 # Project KX27: paleta de trapping
 
-Estado: fase 2 experimental de fronteras visibles, 2026-10-26. Se conservan la captura por tintas y el trapping de sólidos, spots, degradados lineales e imágenes opacas. No cambia la calificación alfa del editor.
+Estado: diagnóstico JSON añadido a la paleta y fase 2 experimental de fronteras visibles, 2026-10-26. Se conservan la captura por tintas y el trapping de sólidos, spots, degradados lineales e imágenes opacas. No cambia la calificación alfa del editor.
 
 ## Uso
 
@@ -54,6 +54,24 @@ Es un detector conservador para **revisión**, no una confirmación de conflicto
 Hereda la aproximación de sobreimpresión Multiply y el renderizador de 8 bits de fase 1; no es una referencia RIP. No recupera spots convertidos a RGB/CMYK, no atribuye bordes a objetos fuente, no decide necesidad/dirección/ancho y no crea vectores. El cálculo es síncrono y repite la separación de imágenes por plancha, sin progreso ni cancelación: esta entrega no afirma una mejora de tiempos frente a un motor comercial. No usa IA ni servicios externos. **Aplicar trapping conserva sus límites y reglas actuales.**
 
 El siguiente trabajo será contrastar estas zonas con encuentros y geometría originales, antes de generar traps a partir de ellas.
+
+## Exportar diagnóstico JSON
+
+El botón **Exportar diagnóstico (.json)** está al inicio de la paleta y funciona con un documento abierto, incluso si Aplicar falló o no hay selección. En la web descarga `nombre-trapping.json`; en escritorio abre el diálogo de guardado con filtro JSON. Si una ruta explícita o el diálogo devuelve otra extensión, se añade `.json` para conservar el documento fuente. No ejecuta el cálculo de trapping ni vuelve a generar capturas/fronteras. No cambia el documento, la selección, el historial ni el error previo mostrado por la paleta; la confirmación de exportación es independiente.
+
+El comando de interfaz `trapping.exportDiagnostic {path?}` usa los mismos servicios de descarga/escritura y el sistema de diálogos asíncronos de la app. Devuelve `{path,bytes,schemaVersion}`. Requiere documento; los errores de ruta, cancelación o escritura no producen una falsa confirmación. No es un comando del motor headless, porque los informes se conservan en la interfaz.
+
+Formato `kx27-trapping-diagnostic`, `schemaVersion:1`:
+
+- Versión de la app y commit de compilación cuando `GITHUB_SHA` está disponible; en compilaciones locales puede ser `null`.
+- Documento activo, revisión/ID de sesión, modo de color, formato de origen y hasta 100 mesas; ajustes de color y lista de planchas de proceso/spot.
+- Controles de trapping, captura y detector; último estado/mensaje de la paleta y snapshot de selección/reglas existentes. Si este snapshot falla, se conserva su error y el resto del diagnóstico se puede exportar.
+- Muestra de hasta 200 elementos nativos, con ID, nombre, tipo, atributos locales y hasta 16 pinturas por elemento. Los sólidos conservan modelo/componentes, enlace de muestra, tint y sobreimpresión; los degradados resumen hasta 16 paradas. Se recorren como máximo 20.000 nodos y 128 niveles, con indicadores de truncado. Los grupos/capas y el arte interno de máscaras/símbolos no constituyen un inventario completo de superficies.
+- Informes ya calculados de contactos, captura de una tinta y fronteras. Cada uno declara `current`, `stale` o `notAvailable`; los informes obsoletos se omiten. Se comprueban documento/UID, controles pertinentes, mesa y ajustes de color incluso si el comando se invoca antes del próximo frame. `notAvailable` también puede significar que un informe se invalidó y se descartó previamente.
+
+Se excluyen expresamente PNG/base64 y texturas de los informes. `fullGeometryIncluded:false` e `imageBytesIncluded:false`: puede contener recuadros y coordenadas de diagnóstico, pero no contornos completos ni píxeles del diseño. El JSON no reemplaza el SVG/PDF/archivo nativo y no es un preset importable. Para reproducir un fallo completo se necesita también el original. La salida se limita a 8 MiB antes de escribir; el usuario decide cuándo compartirla.
+
+La consulta de contactos ahora se invalida también cuando cambian los ajustes de color, igual que las capturas y las fronteras. Los informes de captura/fronteras conservan sus advertencias experimentales, su truncado y sus límites; exportarlos no confirma necesidad de trapping ni constituye validación RIP.
 
 ## Revisar antes de aplicar
 
@@ -119,6 +137,8 @@ Blanco opaco, metálicos, barnices y otras tintas técnicas requieren reglas y d
 Referencias públicas de formato: [ISO 32000, espacios de color](https://pdf-issues.pdfa.org/32000-2-2020/clause08.html) y [planos CMYK/spot de referencia](https://ghostscript.readthedocs.io/en/latest/Devices.html#tiff).
 
 ## Validación
+
+Diagnóstico JSON (2026-10-26): pasaron las 14 pruebas de paleta (9 anteriores y 5 nuevas). Se revisaron capturas nativas en temas claro y oscuro. Pasaron la compilación WASM, formato, assets, brands y layers. El CI general sigue detenido por avisos previos de Clippy en render/PDF. Regresiones de descarga web, guardado de escritorio, extensión JSON, cancelación/fallo de escritura, muestras spot/RGB, informes vigentes/obsoletos, ausencia de imágenes base64 y conservación de documento/selección/historial/error previo. También se prueba el caso real de rechazo por más de 80 objetos con truncado explícito de muestras. Los servicios de archivo se simulan en las pruebas; no se distribuye arte del usuario.
 
 Fase 2 (2026-10-26): pasaron 77 pruebas específicas (26 geometría, 5 detector, 24 trapping del motor, 13 captura/fronteras —dos casos locales opcionales— y 9 paleta). También se aprobaron WASM, formato, assets, brands y layers; el CI general sigue detenido por avisos previos de Clippy en render/PDF y las comprobaciones enfocadas señalan solo los avisos anteriores en Layer Panel, Pathfinder y thumbnail worker. Se inspeccionaron capturas nativas claro/oscuro con el SVG local. El smoke de `vectorcraft-cli bench` antes/después conservó 1.156 nodos dibujados y 31 descartados sobre el trabajo local; los perfiles/cachés de desarrollo difirieron y los tiempos no se usan como afirmación de rendimiento.
 

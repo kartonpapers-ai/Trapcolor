@@ -18,6 +18,7 @@ const BLACK: [&str; 2] = ["Sobreimprimir negro", "Aplicar trapping"];
 #[derive(Debug)]
 struct Analysis {
     document: Arc<Document>,
+    colors: vectorcraft_color::cms::ColorSettings,
     params: Value,
     report: Value,
 }
@@ -67,6 +68,10 @@ pub struct Settings {
     #[serde(skip)]
     pub failed: bool,
     #[serde(skip)]
+    export_message: String,
+    #[serde(skip)]
+    export_failed: bool,
+    #[serde(skip)]
     document: Option<u64>,
     #[serde(skip)]
     analysis: Option<Arc<Analysis>>,
@@ -98,6 +103,8 @@ impl Default for Settings {
             difference: 10.0,
             message: String::new(),
             failed: false,
+            export_message: String::new(),
+            export_failed: false,
             document: None,
             analysis: None,
             analysis_page: 0,
@@ -200,6 +207,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         settings.analysis = None;
         settings.message.clear();
         settings.failed = false;
+        settings.export_message.clear();
+        settings.export_failed = false;
         settings.document = doc_uid;
     }
     let snapshot = vectorcraft_engine::cmd::trapping::snapshot(&app.session).ok();
@@ -207,6 +216,15 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let pairs = snapshot.as_ref().and_then(|v| v["pairs"].as_array()).cloned().unwrap_or_default();
     let ids = snapshot.as_ref().map(|v| v["ids"].clone()).unwrap_or_else(|| json!([]));
     let can_apply = doc_uid.is_some() && artwork >= 2;
+
+    let export_requested = ui
+        .add_enabled(doc_uid.is_some(), egui::Button::new("Exportar diagnóstico (.json)"))
+        .on_hover_text("Guarda ajustes, tintas, una muestra de objetos e informes vigentes. No incrusta imágenes ni reemplaza el archivo original.")
+        .clicked();
+    if !settings.export_message.is_empty() {
+        let color = if settings.export_failed { tokens.error } else { tokens.text };
+        ui.label(egui::RichText::new(&settings.export_message).color(color));
+    }
 
     capture_section(app, ui, &mut settings);
     boundary_section(app, ui, &mut settings);
@@ -242,10 +260,11 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     if snapshot.as_ref().is_some_and(|v| v["images"].as_u64().unwrap_or(0) > 0) {
         ui.label("Sólido + imagen opaca: sólido hacia el marco de la imagen, sin analizar los colores de sus píxeles.");
     }
-    let stale = settings
-        .analysis
-        .as_ref()
-        .is_some_and(|a| a.params != settings.params() || app.session.active().is_none_or(|st| !Arc::ptr_eq(&a.document, &st.doc)));
+    let stale = settings.analysis.as_ref().is_some_and(|a| {
+        a.params != settings.params()
+            || a.colors != vectorcraft_color::cms::active_settings()
+            || app.session.active().is_none_or(|st| !Arc::ptr_eq(&a.document, &st.doc))
+    });
     if stale {
         settings.analysis = None;
         settings.message = "El documento o las reglas cambiaron. Analiza de nuevo.".into();
@@ -260,7 +279,8 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         match app.run("trapping.analyze", p) {
             Ok(report) => {
                 if let Some(st) = app.session.active() {
-                    settings.analysis = Some(Arc::new(Analysis { document: st.doc.clone(), params, report }));
+                    settings.analysis =
+                        Some(Arc::new(Analysis { document: st.doc.clone(), colors: vectorcraft_color::cms::active_settings(), params, report }));
                     settings.analysis_page = 0;
                     settings.message = "Análisis listo. El documento no se modificó.".into();
                     settings.failed = false;
@@ -460,7 +480,185 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.label("Los traps conservan las tintas y sobreimprimen. Para ver la aproximación en pantalla, activa View → Overprint Preview. Admite sólido hacia el marco de PNG/JPEG opacos incrustados. No admite imágenes vinculadas, transparencias, recortes, radiales, imagen contra imagen/degradado ni tintas técnicas.");
         ui.label("Los traps existentes conservan sus ajustes. Selecciona todo el arte que pueda tapar un encuentro. Máximo: 80 objetos y 12.000 nodos por operación.");
     });
+    if export_requested {
+        // Export the controls/reports as they stand at the end of this frame.
+        app.ui.trapping = settings.clone();
+        match app.run("trapping.exportDiagnostic", json!({})) {
+            Ok(_) => {
+                settings.export_message = "Diagnóstico JSON exportado.".into();
+                settings.export_failed = false;
+            }
+            Err(e) if e == "cancelled" => {
+                settings.export_message.clear();
+                settings.export_failed = false;
+            }
+            Err(e) => {
+                settings.export_message = e;
+                settings.export_failed = true;
+            }
+        }
+    }
     app.ui.trapping = settings;
+}
+
+/// Diagnostic metadata only: never serialise a document, a texture or image bytes.
+fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
+    let st = app.session.active().ok_or("Abre un documento para exportar su diagnóstico.")?;
+    let doc = &st.doc;
+    let mut settings = app.ui.trapping.clone();
+    settings.sanitize();
+    let artboard = app.session.active_index().and_then(|i| app.views.get(i)).map_or(0, |v| v.artboard);
+    let colors = vectorcraft_color::cms::active_settings();
+    let plates = vectorcraft_doc::inks::plates(doc);
+    let plate = plates.get(settings.capture_plate.min(plates.len().saturating_sub(1))).map(|p| p.name.as_str()).unwrap_or("");
+    let same_document = settings.document == Some(st.uid);
+    let cached = |present: bool, current: bool, report: Option<&Value>| {
+        if current {
+            let mut report = report.cloned().unwrap_or(Value::Null);
+            if let Some(obj) = report.as_object_mut() {
+                obj.remove("dataBase64");
+                obj.remove("overlayBase64");
+            }
+            json!({"status":"current","report":report})
+        } else {
+            json!({"status":if present{"stale"}else{"notAvailable"},"report":null})
+        }
+    };
+    let analysis = settings.analysis.as_ref();
+    let contacts_current =
+        analysis.is_some_and(|a| same_document && Arc::ptr_eq(&a.document, doc) && a.params == settings.params() && a.colors == colors);
+    let capture = settings.capture.as_ref();
+    let capture_current = capture.is_some_and(|c| {
+        same_document
+            && Arc::ptr_eq(&c.document, doc)
+            && c.colors == colors
+            && c.dpi == settings.capture_dpi
+            && c.plate == plate
+            && c.artboard == artboard
+    });
+    let boundaries = settings.boundaries.as_ref();
+    let boundaries_current = boundaries.is_some_and(|c| {
+        same_document
+            && Arc::ptr_eq(&c.document, doc)
+            && c.colors == colors
+            && c.dpi == settings.boundary_dpi
+            && c.contrast == settings.boundary_contrast
+            && c.artboard == artboard
+    });
+    let snapshot = match vectorcraft_engine::cmd::trapping::snapshot(&app.session) {
+        Ok(v) => json!({"status":"available","report":v}),
+        Err(e) => json!({"status":"error","message":e.to_string()}),
+    };
+    let commit = option_env!("GITHUB_SHA").filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    Ok(json!({
+        "format":"kx27-trapping-diagnostic","schemaVersion":1,
+        "application":{"name":"Project KX27","version":env!("CARGO_PKG_VERSION"),"commit":commit},
+        "document":{"title":doc.title,"sessionId":st.uid,"revision":st.revision,"colorMode":doc.color_mode,
+            "sourceFormat":st.format,"activeArtboard":artboard,"artboards":doc.artboards.iter().take(100).collect::<Vec<_>>(),"artboardsTruncated":doc.artboards.len()>100},
+        "colorSettings":colors,"plates":plates.iter().map(|p|json!({"name":p.name,"spot":p.spot})).collect::<Vec<_>>(),
+        "settings":{"trapping":settings.params(),"capture":{"dpi":settings.capture_dpi,"plate":plate},
+            "boundaries":{"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"minPixels":4}},
+        "panelStatus":{"failed":settings.failed,"message":settings.message},
+        "selection":snapshot,"objects":object_samples(doc),
+        "analyses":{"contacts":cached(analysis.is_some(),contacts_current,analysis.map(|a|&a.report)),
+            "capture":cached(capture.is_some(),capture_current,capture.map(|c|&c.report)),
+            "boundaries":cached(boundaries.is_some(),boundaries_current,boundaries.map(|c|&c.report))},
+        "fullGeometryIncluded":false,"imageBytesIncluded":false,
+        "notes":["Diagnóstico de solo lectura. Para reproducir el trabajo completo se necesita también el archivo original.",
+            "Solo se incluyen informes vigentes ya calculados; no se recalculan contactos, capturas ni fronteras. notAvailable también puede significar que un informe se invalidó y se descartó.",
+            "Las zonas de frontera son candidatos experimentales, no confirmaciones ni objetos de trapping. Se conservan las advertencias y los límites de sus informes."]
+    }))
+}
+
+fn paint_summary(p: &vectorcraft_color::Paint) -> Value {
+    use vectorcraft_color::Paint;
+    match p {
+        Paint::None => json!({"type":"none"}),
+        Paint::Solid { color, swatch, tint } => json!({"type":"solid","color":color,"swatch":swatch,"tint":tint}),
+        Paint::Gradient(g) => json!({"type":"gradient","kind":g.gradient.kind,"stopCount":g.gradient.stops.len(),
+            "stops":g.gradient.stops.iter().take(16).map(|s|json!({"offset":s.offset,"color":s.color,"swatch":s.swatch,"tint":s.tint,"opacity":s.opacity})).collect::<Vec<_>>(),"stopsTruncated":g.gradient.stops.len()>16}),
+        Paint::Pattern { pattern, .. } => json!({"type":"pattern","name":pattern}),
+    }
+}
+
+fn object_samples(doc: &Document) -> Value {
+    use vectorcraft_doc::{Node, NodeKind};
+    struct Sample {
+        nodes: usize,
+        objects: usize,
+        truncated: bool,
+        items: Vec<Value>,
+    }
+    fn visit(n: &Node, depth: usize, s: &mut Sample) {
+        if s.nodes >= 20_000 || depth > 128 {
+            s.truncated = true;
+            return;
+        }
+        s.nodes += 1;
+        if !matches!(n.kind, NodeKind::Layer { .. } | NodeKind::Group { .. }) {
+            s.objects += 1;
+            if s.items.len() < 200 {
+                let paints: Vec<_> = n
+                    .appearance
+                    .items
+                    .iter()
+                    .take(16)
+                    .map(|it| {
+                        json!({"kind":if it.is_fill(){"fill"}else{"stroke"},
+                    "paint":paint_summary(it.paint()),"opacity":it.opacity(),"overprint":it.overprint()})
+                    })
+                    .collect();
+                s.items.push(json!({"id":n.id.0,"name":n.display_name(),"kind":n.kind_label(),"visible":n.visible,"locked":n.locked,
+                    "opacity":n.opacity,"hasOpacityMask":n.extras().mask.is_some(),"paints":paints,"paintsTruncated":n.appearance.items.len()>16}));
+            }
+        }
+        for child in n.children().into_iter().flatten() {
+            if s.nodes >= 20_000 {
+                s.truncated = true;
+                break;
+            }
+            visit(child, depth + 1, s);
+        }
+    }
+    let mut s = Sample { nodes: 0, objects: 0, truncated: false, items: vec![] };
+    for layer in &doc.layers {
+        if s.nodes >= 20_000 {
+            s.truncated = true;
+            break;
+        }
+        visit(layer, 0, &mut s);
+    }
+    json!({"nodesScanned":s.nodes,"objectsSeen":s.objects,"sampleLimit":200,"scanLimit":20_000,"scanTruncated":s.truncated,
+        "samplesTruncated":s.truncated||s.objects>s.items.len(),"samples":s.items})
+}
+
+pub(crate) fn export_diagnostic(app: &mut VectorcraftApp, p: &Value) -> Result<Value, String> {
+    let path = match p.get("path") {
+        None => None,
+        Some(v) => {
+            let path = v.as_str().filter(|s| !s.trim().is_empty()).ok_or("path debe ser una ruta de archivo válida.")?;
+            Some(if path.to_ascii_lowercase().ends_with(".json") { path.to_string() } else { format!("{path}.json") })
+        }
+    };
+    let data = diagnostic(app)?;
+    let bytes = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("El diagnóstico supera 8 MiB. Reduce la selección antes de exportar.".into());
+    }
+    let st = app.session.active().ok_or("No hay documento activo.")?;
+    let title = st.path.as_deref().unwrap_or(&st.doc.title);
+    let name = format!("{}-trapping.json", vectorcraft_engine::cmd::fileio::file_stem(title));
+    let folder = st.path.as_deref().and_then(|p| std::path::Path::new(p).parent()).map(|p| p.to_string_lossy().to_string());
+    let path = match path {
+        Some(path) => path,
+        None if crate::io::is_web(app) => name,
+        None => crate::picks::save(app, &crate::FilePick { name, folder, filters: vec![("JSON", &["json"])] }).ok_or("cancelled")?,
+    };
+    // A save dialog can return a name ending in a different known format too.
+    let path = if path.to_ascii_lowercase().ends_with(".json") { path } else { format!("{path}.json") };
+    crate::io::write_to(&mut app.services, &path, &bytes)?;
+    app.status("Diagnóstico JSON exportado.");
+    Ok(json!({"path":path,"bytes":bytes.len(),"schemaVersion":1}))
 }
 
 fn boundary_textures(ui: &Ui, report: &Value) -> Result<(egui::TextureHandle, egui::TextureHandle), String> {
