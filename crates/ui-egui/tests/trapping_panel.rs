@@ -87,6 +87,20 @@ fn trapping_panel_visual_capture() {
             .unwrap();
             app.run("select.all", json!({})).unwrap();
         }
+        if std::env::var("KX27_CURVE_CAPTURE").is_ok() {
+            let id = app.session.doc().unwrap().selection.objects[1];
+            app.session
+                .edit("Synthetic original curve", |d, _| {
+                    let n = d.node_mut(id).unwrap();
+                    *n = vectorcraft_doc::Node::path(
+                        id,
+                        vectorcraft_geom::shapes::ellipse(vectorcraft_geom::Rect::new(30.0, 30.0, 70.0, 70.0)),
+                        (*n.appearance).clone(),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
         if std::env::var("KX27_BOUNDARY_CAPTURE").is_ok() {
             if let Ok(path) = std::env::var("KX27_BOUNDARY_CAPTURE_SVG") {
                 let bytes = std::fs::read(path).unwrap();
@@ -129,7 +143,18 @@ fn trapping_panel_visual_capture() {
             h.get_by_label_contains("Zona 1 ·").click();
             h.run_steps(4);
         }
-        h.render().unwrap().save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
+        if std::env::var("KX27_CURVE_CAPTURE").is_ok() {
+            h.get_by_label("Verificar curvas del par 1").click();
+            h.run_steps(4);
+        }
+        let rendered = h.render().unwrap();
+        if std::env::var("KX27_CURVE_CAPTURE").is_ok() {
+            let color = vectorcraft_ui_egui::theme::Tokens::for_brightness(theme).axis_y.to_array();
+            let count =
+                rendered.pixels().filter(|p| p.0[0].abs_diff(color[0]) < 4 && p.0[1].abs_diff(color[1]) < 4 && p.0[2].abs_diff(color[2]) < 4).count();
+            assert!(count > 10, "verified samples must remain visibly green in both themes: {count}");
+        }
+        rendered.save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
     }
 }
 
@@ -617,4 +642,57 @@ fn boundary_zone_selects_original_sources_and_pair_button_keeps_document_and_his
     h.state_mut().run("shape.rectangle", json!({"x":110,"y":0,"width":10,"height":10})).unwrap();
     h.run_steps(4);
     assert!(h.query_by_label("Resaltar par 1").is_none(), "source references must disappear when art changes");
+}
+
+#[test]
+fn local_curve_button_exports_fresh_samples_without_edits_and_invalidates_immediately() {
+    let mut app = app();
+    let files = diagnostic_download(&mut app);
+    let doc = app.session.doc().unwrap().doc.clone();
+    let selected = app.session.doc().unwrap().selection.objects.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    let redo = app.session.doc().unwrap().history.redo.len();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 2200.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Fronteras visibles · Fase 2").click();
+    h.run_steps(4);
+    h.get_by_label("Detectar fronteras").click();
+    h.run_steps(4);
+    h.get_by_label_contains("Zona 1 ·").click();
+    h.run_steps(4);
+    h.get_by_label("Verificar curvas del par 1").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    h.get_by_label("Curvas del par 1");
+    h.get_by_label("Exportar diagnóstico (.json)").click();
+    h.run_steps(4);
+    let r: serde_json::Value = serde_json::from_slice(&files.borrow()[0].1).unwrap();
+    assert_eq!(r["analyses"]["curves"]["status"], "current");
+    assert!(r["analyses"]["curves"]["report"]["visibleSamples"].as_u64().unwrap() > 0);
+    assert!(!r["analyses"]["curves"]["report"]["fragments"].as_array().unwrap().is_empty());
+    assert_eq!(r["localCurveSamplesIncluded"], true);
+    assert_eq!(r["fullGeometryIncluded"], false);
+    assert!(std::sync::Arc::ptr_eq(&doc, &h.state().session.doc().unwrap().doc));
+    assert_eq!(selected, h.state().session.doc().unwrap().selection.objects);
+    assert_eq!(undo, h.state().session.doc().unwrap().history.undo.len());
+    assert_eq!(redo, h.state().session.doc().unwrap().history.redo.len());
+    h.state_mut().run("shape.rectangle", json!({"x":5,"y":5,"width":10,"height":10})).unwrap();
+    h.state_mut().run("trapping.exportDiagnostic", json!({})).unwrap();
+    let r: serde_json::Value = serde_json::from_slice(&files.borrow()[1].1).unwrap();
+    assert_eq!(r["analyses"]["curves"]["status"], "stale");
+    assert!(r["analyses"]["curves"]["report"].is_null());
+    h.run_steps(4);
+    assert!(h.query_by_label("Curvas del par 1").is_none());
 }

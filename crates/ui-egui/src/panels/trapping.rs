@@ -58,6 +58,14 @@ impl std::fmt::Debug for BoundaryCapture {
     }
 }
 
+#[derive(Debug)]
+struct CurveCheck {
+    boundary: Arc<BoundaryCapture>,
+    zone: usize,
+    pair: usize,
+    report: Value,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -94,6 +102,8 @@ pub struct Settings {
     boundary_page: usize,
     #[serde(skip)]
     boundary_selected: Option<usize>,
+    #[serde(skip)]
+    curves: Option<Arc<CurveCheck>>,
 }
 
 impl Default for Settings {
@@ -121,6 +131,7 @@ impl Default for Settings {
             boundaries: None,
             boundary_page: 0,
             boundary_selected: None,
+            curves: None,
         }
     }
 }
@@ -205,6 +216,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     if settings.document != doc_uid {
         clear_capture(ui, &mut settings);
         settings.boundaries = None;
+        settings.curves = None;
         settings.boundary_selected = None;
         settings.analysis = None;
         settings.message.clear();
@@ -503,7 +515,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     app.ui.trapping = settings;
 }
 
-/// Diagnostic metadata only: never serialise a document, a texture or image bytes.
+/// Bounded metadata and local curve samples, never a whole document, texture or image bytes.
 fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
     let st = app.session.active().ok_or("Abre un documento para exportar su diagnóstico.")?;
     let doc = &st.doc;
@@ -548,6 +560,9 @@ fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
             && c.contrast == settings.boundary_contrast
             && c.artboard == artboard
     });
+    let curves = settings.curves.as_ref();
+    let curves_current = curves
+        .is_some_and(|c| boundaries_current && boundaries.is_some_and(|b| Arc::ptr_eq(b, &c.boundary)) && settings.boundary_selected == Some(c.zone));
     let snapshot = match vectorcraft_engine::cmd::trapping::snapshot(&app.session) {
         Ok(v) => json!({"status":"available","report":v}),
         Err(e) => json!({"status":"error","message":e.to_string()}),
@@ -565,10 +580,12 @@ fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
         "selection":snapshot,"objects":object_samples(doc),
         "analyses":{"contacts":cached(analysis.is_some(),contacts_current,analysis.map(|a|&a.report)),
             "capture":cached(capture.is_some(),capture_current,capture.map(|c|&c.report)),
-            "boundaries":cached(boundaries.is_some(),boundaries_current,boundaries.map(|c|&c.report))},
-        "fullGeometryIncluded":false,"imageBytesIncluded":false,
+            "boundaries":cached(boundaries.is_some(),boundaries_current,boundaries.map(|c|&c.report)),
+            "curves":cached(curves.is_some(),curves_current,curves.map(|c|&c.report))},
+        "fullGeometryIncluded":false,"imageBytesIncluded":false,"localCurveSamplesIncluded":curves_current,
         "notes":["Diagnóstico de solo lectura. Para reproducir el trabajo completo se necesita también el archivo original.",
             "Solo se incluyen informes vigentes ya calculados; no se recalculan contactos, capturas ni fronteras. notAvailable también puede significar que un informe se invalidó y se descartó.",
+            "Las curvas pueden incluir fragmentos locales muestreados en puntos; no son contornos completos ni geometría de trapping.",
             "Las zonas de frontera son candidatos experimentales, no confirmaciones ni objetos de trapping. Se conservan las advertencias y los límites de sus informes."]
     }))
 }
@@ -717,6 +734,7 @@ fn choose_zone(app: &mut VectorcraftApp, settings: &mut Settings, c: &BoundaryCa
         return;
     };
     settings.boundary_selected = Some(index);
+    settings.curves = None;
     let ids: std::collections::BTreeSet<_> = zone["attribution"]["pairs"]
         .as_array()
         .into_iter()
@@ -752,6 +770,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
     });
     if stale {
         settings.boundaries = None;
+        settings.curves = None;
         settings.boundary_selected = None;
         settings.message = "El documento o los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
         settings.failed = false;
@@ -763,12 +782,14 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
         number(ui, "Contraste mínimo", &mut settings.boundary_contrast, 5.0..=100.0, " %");
         if before != (settings.boundary_dpi, settings.boundary_contrast) {
             settings.boundaries = None;
+            settings.curves = None;
             settings.boundary_selected = None;
             settings.message = "Los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
             settings.failed = false;
         }
         if ui.add_enabled(app.session.active().is_some(), egui::Button::new("Detectar fronteras")).clicked() {
             settings.boundaries = None;
+            settings.curves = None;
             settings.boundary_selected = None;
             let result =
                 app.run("trapping.boundaries", json!({"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"artboard":artboard}));
@@ -855,6 +876,39 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                         egui::Color32::WHITE,
                     );
                 }
+                if let Some(check) = settings.curves.as_ref().filter(|v| Arc::ptr_eq(&v.boundary, &c)) {
+                    let region = &c.report["region"];
+                    if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (region[0].as_f64(), region[1].as_f64(), region[2].as_f64(), region[3].as_f64())
+                        && x1 > x0
+                        && y1 > y0
+                    {
+                        let point = |x: f64, y: f64| {
+                            response.rect.min
+                                + egui::vec2(
+                                    ((x - x0) / (x1 - x0)) as f32 * response.rect.width(),
+                                    ((y - y0) / (y1 - y0)) as f32 * response.rect.height(),
+                                )
+                        };
+                        let centers: Vec<_> = check.report["fragments"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|fragment| {
+                                let v = fragment.as_array().filter(|v| v.len() == 6)?;
+                                Some(point(v.get(2)?.as_f64()?, v.get(3)?.as_f64()?))
+                            })
+                            .collect();
+                        // Paint every halo first: a later halo must not erase the
+                        // green centre of a neighbouring subpixel sample.
+                        let tokens = Tokens::get(ui.ctx());
+                        for center in &centers {
+                            ui.painter().circle_filled(*center, 2.0, tokens.text);
+                        }
+                        for center in centers {
+                            ui.painter().circle_filled(center, 1.25, tokens.axis_y);
+                        }
+                    }
+                }
                 if let Some(index) = settings.boundary_selected
                     && let Some(zone) = c.report["zones"].as_array().and_then(|a| a.get(index))
                 {
@@ -939,8 +993,43 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                                     }
                                 }
                             }
+                            if ui.button(format!("Verificar curvas del par {}", pair_index + 1)).clicked() {
+                                settings.curves = None;
+                                match app.run("trapping.verifyCurves", json!({"ids":pair["ids"],"region":zone["bounds"]})) {
+                                    Ok(report) => {
+                                        settings.curves = Some(Arc::new(CurveCheck { boundary: c.clone(), zone: index, pair: pair_index, report }));
+                                        settings.failed = false;
+                                        settings.message = "Curvas comprobadas por muestreo. El documento no se modificó.".into();
+                                    }
+                                    Err(e) => {
+                                        settings.failed = true;
+                                        settings.message = e;
+                                    }
+                                }
+                            }
                         }
                     });
+                }
+                if let Some(check) = settings.curves.as_ref().filter(|v| v.zone == index && Arc::ptr_eq(&v.boundary, &c)) {
+                    ui.strong(format!("Curvas del par {}", check.pair + 1));
+                    let r = &check.report;
+                    let found = r["visibleSamples"].as_u64().unwrap_or(0);
+                    if found > 0 {
+                        ui.label(format!("{found} muestras de frontera visible sobre las curvas originales."));
+                    } else {
+                        ui.label("No se verificó una frontera visible con estas muestras.");
+                    }
+                    if r["status"] == "incomplete" {
+                        ui.label("Verificación incompleta: hay muestras inciertas o se alcanzó el presupuesto.");
+                    }
+                    ui.label(format!(
+                        "{} sondeos · {} tapados · {} con papel · {} inciertos",
+                        r["testedSamples"], r["occludedSamples"], r["gapSamples"], r["unresolvedSamples"]
+                    ));
+                    if r["fragmentsTruncated"] == true {
+                        ui.label("El mapa resume los fragmentos comprobados para mantener la revisión ágil.");
+                    }
+                    ui.label("Verde = muestras de la curva; no es un trap de 0,10 mm. Tolerancia de sondeo: 0,0001 mm.");
                 }
             }
             if c.report["zonesTruncated"] == true {

@@ -1,6 +1,6 @@
 # Project KX27: paleta de trapping
 
-Estado: vínculo inicial de zonas con sólidos originales y diagnóstico JSON, 2026-10-26. Se conservan la captura por tintas y el trapping de sólidos, spots, degradados lineales e imágenes opacas. No cambia la calificación alfa del editor.
+Estado: verificación local de curvas originales, vínculo con sólidos y diagnóstico JSON, 2026-10-27. Se conservan la captura por tintas y el trapping de sólidos, spots, degradados lineales e imágenes opacas. No cambia la calificación alfa del editor.
 
 ## Uso
 
@@ -53,7 +53,7 @@ Es un detector conservador para **revisión**, no una confirmación de conflicto
 
 Hereda la aproximación de sobreimpresión Multiply y el renderizador de 8 bits de fase 1; no es una referencia RIP. No recupera spots convertidos a RGB/CMYK, la atribución inicial se limita a sólidos opacos y no valida el contacto vectorial; no decide necesidad/dirección/ancho y no crea vectores. El cálculo es síncrono y repite la separación de imágenes por plancha, sin progreso ni cancelación: esta entrega no afirma una mejora de tiempos frente a un motor comercial. No usa IA ni servicios externos. **Aplicar trapping conserva sus límites y reglas actuales.**
 
-El siguiente trabajo será verificar los pares atribuidos con sus curvas originales en cada zona, antes de generar traps a partir de ellas.
+La comprobación local de curvas descrita a continuación permite revisar muestras de estos pares antes de preparar traps.
 
 ## Relacionar zonas con originales: fase 3 inicial
 
@@ -70,6 +70,28 @@ El clic usa los píxeles de la zona y una tolerancia de dos píxeles, no su caja
 El JSON incluye `sourceObjects` (ID, nombre acotado, tintas, caja) y la atribución de cada zona cuando el informe está vigente. Omite el PNG interno `zoneMapBase64`, igual que los otros PNG: no incrusta imágenes ni geometría completa. Sigue siendo diagnóstico de la sesión, no un archivo importable de traps.
 
 A 72 ppp no se mide un trap de 0,10 mm. Antes de generar trapping a partir de estos pares hay que comprobar el borde visible exacto con la geometría original, su oclusión y las reglas de tinta. **El límite de 80 objetos y las restricciones de Aplicar permanecen vigentes.**
+
+## Verificar curvas locales
+
+Después de **Detectar fronteras**, elige una zona y pulsa **Verificar curvas del par N**. No hace falta seleccionar todo el trabajo. El resultado indica cuántas muestras de frontera visible se encontraron, cuántas quedaron tapadas, cuántas encontraron papel y cuántas resultaron inciertas. **Verde** marca puntos sobre la curva original dentro del mapa. Puedes ampliar el mapa y ocultar las marcas rojas para revisarlos. Las marcas no representan un trapping de 0,10 mm ni se convierten en objetos del documento.
+
+La consulta `trapping.verifyCurves` recibe `{ids:[idA,idB],region:[x0,y0,x1,y1]}` en puntos. Trabaja con la pareja indicada y los contornos originales de sus recortes, no con los píxeles rojos ni con una comparación de todos los vectores entre sí. Reutiliza la escena conservadora de atribución: sólidos opacos sin trazo/sobreimpresión se comprueban con sus reglas reales de relleno y apilado, incluidos agujeros, cierres implícitos y recortes simples. Las demás superficies bloquean su caja y producen incertidumbre cuando intervienen; un recorte no admitido bloquea el grupo completo.
+
+Evalúa directamente segmentos lineales, cuadráticos o cúbicos. Subdivide las curvas locales hasta que la diagonal de cada caja mida como máximo **0,05 mm**. En el punto medio prueba ambos lados de la normal a **0,0001 mm** y a **0,002 mm**; exige encontrar los mismos dos objetos en el mismo orden en ambas escalas. Es una comprobación numérica con tolerancia, no un cálculo exacto de distancia entre curvas ni una prueba de toda la frontera. Los encuentros entre muestras y los huecos inferiores a la tolerancia pueden perderse. La precisión matemática declarada no equivale a resolución de impresión, precisión del archivo o garantía de registro.
+
+Devuelve `testedSamples`, `visibleSamples`, `occludedSamples`, `gapSamples`, `unresolvedSamples`, `truncated`, `localObjects`, `stepMm`, `probeMm` y `status`:
+
+- `visibleBoundaryFound`: hay muestras atribuibles a ambos lados y terminó el recorrido sin incertidumbre; **no significa que todo el borde esté comprobado**.
+- `noVerifiedBoundary`: no encontró esas muestras en el recorrido; no demuestra ausencia de contacto entre ellas.
+- `incomplete`: encontró composición incierta o alcanzó un presupuesto. Puede incluir puntos verdes válidos, pero nunca confirma ausencia de contacto.
+
+`fragments` contiene inicio/medio/fin de pequeños fragmentos de curva en puntos del documento (`[ax,ay,mx,my,bx,by]`). **Solo el punto medio se clasifica**, declarado como `fragmentVerification:"midpointOnly"`. La UI marca ese punto con un halo y un centro verde legibles incluso cuando el fragmento es menor que un píxel de pantalla. Se muestran hasta 1.024 fragmentos distribuidos por el resultado, con `fragmentsTruncated` si se resumió el mapa; este resumen no cambia los recuentos completos de muestras evaluadas.
+
+Presupuestos: hereda 20.000 nodos/128 niveles de la captura; hasta **512 superficies locales y 8.000 anclas contabilizadas** entre rellenos y recortes. El número de sondeos se ajusta al coste de las superficies/recortes, con un máximo de **8.192**; hasta 60.000 visitas de subdivisión y profundidad 24. Un presupuesto de geometría o superficies devuelve error con indicación de usar una región menor; los límites durante el muestreo dejan `truncated:true` y estado incompleto. El panel usa la caja de la zona; una región menor se puede pedir mediante el comando. No decodifica imágenes ni ejecuta offsets o booleanas de pares globales.
+
+La consulta y el botón no cambian documento, selección, historial o muestras de tinta. El informe se conserva solo para la captura y zona que lo originaron; cambiar zona, volver a detectar o invalidar el mapa lo descarta. El JSON comprueba su vigencia incluso antes del siguiente frame y añade `analyses.curves` y `localCurveSamplesIncluded`. Los fragmentos son muestras locales, no contornos completos: se mantiene `fullGeometryIncluded:false`.
+
+Esta etapa todavía **no genera trapping desde el mapa** ni modifica el límite de 80 objetos de Aplicar. El siguiente paso es preparar geometría de trap local con reglas de tinta y una previsualización independiente, sin convertir estas muestras en una validación completa.
 
 ## Exportar diagnóstico JSON
 
@@ -154,6 +176,8 @@ Referencias públicas de formato: [ISO 32000, espacios de color](https://pdf-iss
 
 ## Validación
 
+Curvas locales (2026-10-27): pruebas de bordes compartidos y superpuestos, curvas cúbicas sobre el contorno original, huecos pequeños, oclusión, transparencia como bloqueador, recortes/agujeros, cierres implícitos, spots, documentos con más de 80 objetos, presupuestos y entradas inválidas. La UI prueba verificación, JSON vigente/obsoleto y conservación de documento/selección/deshacer/rehacer. Pasaron las 8 pruebas de consulta y las 16 de paleta (incluida captura nativa de una elipse con comprobación de píxeles verdes en claro/oscuro), además de las 18 de captura/atribución y las 24 de trapping del motor. Pasaron WASM, formato, assets (320), brands y layers (28). El CI general conserva el aviso previo de Clippy en render/fx.rs; los chequeos enfocados conservan los anteriores de Layer Panel, Pathfinder y thumbnail worker. Se revisó la paleta en 280/340 px. No se ejecutó un benchmark comparativo ni se afirma validación de producción.
+
 Fase 3 inicial (2026-10-26): comprobación de atribución a sólidos/spot visibles, exclusión de objetos tapados y composición no admitida, varios pares en una zona, recortes, agujeros, IDs auxiliares superiores a 255, región/ppp y más de 80 objetos. La paleta prueba selección de originales/par, conservación del documento y deshacer/rehacer, invalidación después de editar y omisión del PNG interno en JSON. Pasaron 90 pruebas específicas: 26 de geometría, 24 de trapping del motor, 18 de captura/atribución (dos casos locales opcionales sin activar), 5 del detector, 1 de conversión de los 20.001 códigos auxiliares, 15 de paleta y 1 de localización de píxeles. Pasaron WASM, formato, assets (320), brands y layers (28). Se inspeccionaron capturas nativas claro/oscuro de 280/340 px y se verificó el clic real sobre el mapa. El CI general conserva los avisos anteriores de Clippy en render/PDF; el chequeo enfocado de UI conserva los de Pathfinder/thumbnail worker. No se afirma validación RIP ni una ventaja de rendimiento.
 
 Diagnóstico JSON (2026-10-26): pasaron las 14 pruebas de paleta (9 anteriores y 5 nuevas). Se revisaron capturas nativas en temas claro y oscuro. Pasaron la compilación WASM, formato, assets, brands y layers. El CI general sigue detenido por avisos previos de Clippy en render/PDF. Regresiones de descarga web, guardado de escritorio, extensión JSON, cancelación/fallo de escritura, muestras spot/RGB, informes vigentes/obsoletos, ausencia de imágenes base64 y conservación de documento/selección/historial/error previo. También se prueba el caso real de rechazo por más de 80 objetos con truncado explícito de muestras. Los servicios de archivo se simulan en las pruebas; no se distribuye arte del usuario.
@@ -167,6 +191,7 @@ cargo test -p vectorcraft-trapping
 cargo test -p vectorcraft-render --lib boundaries::tests
 cargo test -p vectorcraft-engine --test trapping
 cargo test -p vectorcraft-engine --test trapping_capture
+cargo test -p vectorcraft-engine --test trapping_curves
 cargo test -p vectorcraft-ui-egui --test trapping_panel
 cargo check --target wasm32-unknown-unknown -p vectorcraft-web
 cargo xtask ci
@@ -195,3 +220,5 @@ El workflow **Project KX27 web** compila la aplicación completa con Trunk y dej
 Para alojarla, habilita **Settings → Pages → Source: GitHub Actions** en el repositorio. Una vez que el workflow esté en la rama principal, ejecútalo con **Run workflow** y la opción **publish** activada. La acción de despliegue devuelve la URL real. La configuración inicial de Pages requiere permisos de administración y no puede activarse con el `GITHUB_TOKEN` normal del workflow.
 
 Capturas opcionales de fase 2: `KX27_BOUNDARY_CAPTURE=1 TRAPCOLOR_SCREENSHOTS=/tmp/kx27-phase2 cargo test -p vectorcraft-ui-egui --test trapping_panel trapping_panel_visual_capture`. Añade `KX27_SOURCE_CAPTURE=1` para revisar la primera zona y mostrar sus controles de objetos en capturas de 280/340 px. `KX27_BOUNDARY_CAPTURE_SVG` permite revisar un SVG propio local sin incorporarlo a las pruebas. Para generar el diagnóstico local del motor: `KX27_BOUNDARY_SVG=/ruta/propia.svg cargo test -p vectorcraft-engine --test trapping_capture optional_real_job_boundary_capture -- --nocapture`.
+
+Capturas de comprobación de curvas: añade `KX27_CURVE_CAPTURE=1 KX27_SOURCE_CAPTURE=1 KX27_BOUNDARY_CAPTURE=1` al comando de captura de paleta; usa una elipse cúbica sintética y muestra el resultado de verificar el primer par.

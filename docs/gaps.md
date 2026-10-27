@@ -1,5 +1,7 @@
 # Gaps
 
+> Project KX27 · 2026-10-27: attributed pairs can verify original fill/clip curves inside their candidate zone. Bounded numerical probes check conservative visible ownership, distinguish paper/occlusion/unknown results, show green sample markers and export fresh local diagnostics. Read-only: no offsets, trap generation or Apply-limit changes. Upstream parity scores are unchanged. See [local curve verification](trapcolor-trapping.md#verificar-curvas-locales).
+
 > Project KX27 · 2026-10-26: visible boundary zones now carry bounded, conservative source-object pairs for opaque solid fills, including linked spots. A temporary hard-edge ID render respects occlusion and supported clips; unsupported compositing blocks attribution. Clicking a marked pixel or zone selects the original objects through `select.set`, with per-pair review and fresh JSON diagnostics. No trap geometry or Apply-limit changes; upstream parity scores are unchanged. See [source attribution](trapcolor-trapping.md#relacionar-zonas-con-originales-fase-3-inicial).
 
 > Project KX27 · 2026-10-26: the Trapping palette exports a versioned JSON diagnostic with controls, plates, bounded object samples and only fresh cached reports. Browser download/native save use app services; no geometry calculation, image payloads or document edits. Contact analysis also tracks colour-setting freshness. Upstream parity scores are unchanged. See [diagnostic scope](trapcolor-trapping.md#exportar-diagnóstico-json).

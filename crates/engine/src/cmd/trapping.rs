@@ -664,6 +664,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "trapping.verifyCurves", "Verify Local Original Curves", [], None,
+            "{ids:[two distinct source IDs], region:[x0,y0,x1,y1] in points} → {experimental, ids, region, status, testedSamples, visibleSamples, occludedSamples, gapSamples, unresolvedSamples, truncated, fragments, fragmentsTruncated, stepMm, probeMm, localObjects, warnings}; read-only bounded numerical checks of original fill curves and clips, conservative opaque-solid visibility; not a full contact proof, trap decision or trap geometry",has_doc,verify_curves),
         cmd!(query "trapping.boundaries", "Detect Visible Ink Boundary Candidates", [], None,
             "{dpi?:36..600 (72), artboard?:index (0), region?:[x0,y0,x1,y1] in points, contrast?:5..100 (15 percent per plate), minPixels?:2..1000 (4)} → {experimental, dpi, pixelMm, region, width, height, plates, zoneCount, zones:[{index,pixels,bounds,plates,attribution}], sourceObjects, zoneMapBase64, zonesTruncated, markedPixels, discardedPixels, dataBase64, overlayBase64, warnings}; read-only candidates from sharp opposing ink changes in aligned composed plates, bounded conservative opaque-solid source attribution, no trap decisions or direction; max 1 MP output, 12 plates and 8 MP source images; first 200 zones reported, all retained marks shown", has_doc, boundary_capture),
         cmd!(query "trapping.capture", "Capture Experimental Ink Plate", [], None,
@@ -800,4 +802,26 @@ fn boundary_capture(s: &mut Session, p: &Value) -> Result<Value> {
             "El informe detalla como máximo las primeras 200 zonas conectadas en orden de lectura. El mapa conserva todas las marcas retenidas. El cálculo es síncrono, sin progreso ni cancelación."
         ]
     }))
+}
+
+fn verify_curves(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "trapping.verifyCurves";
+    let a = p["ids"].as_array().filter(|a| a.len() == 2).ok_or_else(|| bad(C, "ids debe contener exactamente dos objetos."))?;
+    let read = |i: usize| a.get(i).and_then(Value::as_u64).map(NodeId).ok_or_else(|| bad(C, "Los IDs deben ser enteros positivos."));
+    let ids = [read(0)?, read(1)?];
+    if p.get("region").is_none_or(|v| !v.is_array()) {
+        return Err(bad(C, "Indica la región de la zona que quieres verificar."));
+    }
+    let doc = &s.doc()?.doc;
+    let region = capture_region(doc, p, C)?;
+    let r = vectorcraft_render::curves::verify(doc, ids, region).map_err(|e| bad(C, e))?;
+    Ok(json!({"experimental":true,"ids":ids,"region":[region.x0,region.y0,region.x1,region.y1],
+        "status":if r.truncated || r.unresolved>0 {"incomplete"}else if r.visible>0 {"visibleBoundaryFound"}else{"noVerifiedBoundary"},
+        "testedSamples":r.tested,"visibleSamples":r.visible,"occludedSamples":r.occluded,"gapSamples":r.gaps,"unresolvedSamples":r.unresolved,
+        "truncated":r.truncated,"fragmentVerification":"midpointOnly","fragments":r.fragments,"fragmentsTruncated":r.fragments_truncated,"localObjects":r.local_objects,
+        "stepMm":vectorcraft_render::curves::STEP_MM,"probeMm":vectorcraft_render::curves::PROBE_MM,
+        "warnings":["Verificación numérica por muestreo de curvas originales y recortes, no una prueba de toda la frontera ni una decisión de trapping.",
+            "Exige los dos sólidos a ambos lados a 0,0001 mm y 0,002 mm del contorno. Detalles entre sondeos o menores que la tolerancia pueden perderse.",
+            "Imágenes, degradados, trazos, máscaras y sobreimpresión bloquean conservadoramente su caja. Un resultado incompleto no confirma ausencia de contacto.",
+            "Los fragmentos verdes aproximan por puntos las curvas comprobadas; no representan el ancho de 0,10 mm ni son geometría nueva del documento."]}))
 }

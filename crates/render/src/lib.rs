@@ -8,6 +8,7 @@
 
 pub mod boundaries;
 mod brush_fx;
+pub mod curves;
 pub mod encode;
 mod freeform;
 mod fx;

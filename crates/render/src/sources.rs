@@ -139,12 +139,8 @@ fn transform(arc: &mut Arc<Node>, doc: &Document, sources: &mut Vec<Source>, pla
     }
 }
 
-/// Call only after the technical capture has validated the original tree and its
-/// budgets. The ID map is temporary, not document art and never a colour separation.
-pub(crate) fn attribute(renderer: &mut Renderer, doc: &Document, region: Rect, dpi: f64, analysis: &Analysis) -> Attribution {
-    if analysis.zones.is_empty() {
-        return Attribution { sources: Vec::new(), zones: Vec::new() };
-    }
+/// Temporary conservative surface scene, shared by ID rendering and curve queries.
+pub(crate) fn prepare(doc: &Document) -> (Document, Vec<Source>) {
     let mut mapped = doc.clone();
     mapped.color_mode = ColorMode::Rgb;
     let mut sources = Vec::new();
@@ -152,6 +148,16 @@ pub(crate) fn attribute(renderer: &mut Renderer, doc: &Document, region: Rect, d
     for node in &mut mapped.layers {
         transform(node, doc, &mut sources, &plates);
     }
+    (mapped, sources)
+}
+
+/// Call only after the technical capture has validated the original tree and its
+/// budgets. The ID map is temporary, not document art and never a colour separation.
+pub(crate) fn attribute(renderer: &mut Renderer, doc: &Document, region: Rect, dpi: f64, analysis: &Analysis) -> Attribution {
+    if analysis.zones.is_empty() {
+        return Attribution { sources: Vec::new(), zones: Vec::new() };
+    }
+    let (mapped, sources) = prepare(doc);
     let options = RenderOptions {
         background: None,
         anti_alias: AntiAlias::None,

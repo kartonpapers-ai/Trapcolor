@@ -18,7 +18,7 @@ pub const MAX_CAPTURE_PIXELS: u64 = 4_000_000;
 const MAX_IMAGE_PIXELS: u64 = 32_000_000;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
-fn check_art(doc: &Document) -> Result<(), String> {
+pub(crate) fn check_art(doc: &Document) -> Result<(), String> {
     fn visit(n: &Node, doc: &Document, mask: bool, depth: usize, count: &mut usize) -> Result<(), String> {
         *count += 1;
         if depth > 128 || *count > 20_000 {
