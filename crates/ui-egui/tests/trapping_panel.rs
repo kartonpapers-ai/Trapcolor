@@ -111,7 +111,16 @@ fn trapping_panel_visual_capture() {
         }
         let mut ready = false;
         let mut h = Harness::builder()
-            .with_size(egui::vec2(width, if std::env::var("KX27_SOURCE_CAPTURE").is_ok() { 1600.0 } else { 1050.0 }))
+            .with_size(egui::vec2(
+                width,
+                if std::env::var("KX27_PREVIEW_CAPTURE").is_ok() {
+                    2400.0
+                } else if std::env::var("KX27_SOURCE_CAPTURE").is_ok() {
+                    1600.0
+                } else {
+                    1050.0
+                },
+            ))
             .wgpu()
             .build_ui_state(
                 move |ui, app: &mut VectorcraftApp| {
@@ -146,6 +155,11 @@ fn trapping_panel_visual_capture() {
         if std::env::var("KX27_CURVE_CAPTURE").is_ok() {
             h.get_by_label("Verificar curvas del par 1").click();
             h.run_steps(4);
+        }
+        if std::env::var("KX27_PREVIEW_CAPTURE").is_ok() {
+            h.get_by_label("Previsualizar franja").click();
+            h.run_steps(4);
+            assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
         }
         let rendered = h.render().unwrap();
         if std::env::var("KX27_CURVE_CAPTURE").is_ok() {
@@ -695,4 +709,84 @@ fn local_curve_button_exports_fresh_samples_without_edits_and_invalidates_immedi
     assert!(r["analyses"]["curves"]["report"].is_null());
     h.run_steps(4);
     assert!(h.query_by_label("Curvas del par 1").is_none());
+}
+
+#[test]
+fn local_band_preview_is_read_only_directional_and_exports_only_fresh_geometry() {
+    let mut app = app();
+    let files = diagnostic_download(&mut app);
+    let doc = app.session.doc().unwrap().doc.clone();
+    let selected = app.session.doc().unwrap().selection.objects.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    let redo = app.session.doc().unwrap().history.redo.len();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 3000.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Fronteras visibles · Fase 2").click();
+    h.run_steps(4);
+    h.get_by_label("Detectar fronteras").click();
+    h.run_steps(4);
+    h.get_by_label_contains("Zona 1 ·").click();
+    h.run_steps(4);
+    h.get_by_label("Verificar curvas del par 1").click();
+    h.run_steps(4);
+    h.get_by_label("Previsualizar franja").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    h.get_by_label("Franja temporal · 0.10 mm");
+    h.get_by_label("Exportar diagnóstico (.json)").click();
+    h.run_steps(4);
+    let first: serde_json::Value = serde_json::from_slice(&files.borrow()[0].1).unwrap();
+    assert_eq!(first["analyses"]["preview"]["status"], "current");
+    assert_eq!(first["localPreviewGeometryIncluded"], true);
+    let report = &first["analyses"]["preview"]["report"];
+    assert!(report["bandPath"].as_str().unwrap().len() > 10);
+    assert!(report.get("dataBase64").is_none());
+    assert!(report.get("overlayBase64").is_none());
+    let before_ids = report["ids"].as_array().unwrap().clone();
+    h.get_by_label("Invertir origen y receptor").click();
+    h.run_steps(4);
+    assert!(h.query_by_label("Franja temporal · 0.10 mm").is_none());
+    h.get_by_label("Previsualizar franja").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    h.get_by_label("Mostrar franja resaltada").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.preview_show);
+    h.get_by_label("Exportar diagnóstico (.json)").click();
+    h.run_steps(4);
+    let second: serde_json::Value = serde_json::from_slice(&files.borrow()[1].1).unwrap();
+    let after_ids = second["analyses"]["preview"]["report"]["ids"].as_array().unwrap();
+    assert_eq!(after_ids, &before_ids.into_iter().rev().collect::<Vec<_>>());
+    assert!(std::sync::Arc::ptr_eq(&doc, &h.state().session.doc().unwrap().doc));
+    assert_eq!(selected, h.state().session.doc().unwrap().selection.objects);
+    assert_eq!(undo, h.state().session.doc().unwrap().history.undo.len());
+    assert_eq!(redo, h.state().session.doc().unwrap().history.redo.len());
+    // Direct export must detect stale controls before any UI frame runs.
+    h.state_mut().ui.trapping.preview_width_mm = 0.2;
+    h.state_mut().run("trapping.exportDiagnostic", json!({})).unwrap();
+    let stale: serde_json::Value = serde_json::from_slice(&files.borrow()[2].1).unwrap();
+    assert_eq!(stale["analyses"]["preview"]["status"], "stale");
+    assert!(stale["analyses"]["preview"]["report"].is_null());
+    h.run_steps(4);
+    h.get_by_label("Previsualizar franja").click();
+    h.run_steps(4);
+    h.get_by_label("Franja temporal · 0.20 mm");
+    h.state_mut().run("shape.rectangle", json!({"x":5,"y":5,"width":5,"height":5})).unwrap();
+    h.state_mut().run("trapping.exportDiagnostic", json!({})).unwrap();
+    let stale: serde_json::Value = serde_json::from_slice(&files.borrow()[3].1).unwrap();
+    assert_eq!(stale["analyses"]["preview"]["status"], "stale");
+    h.run_steps(4);
+    assert!(h.query_by_label("Previsualizar franja").is_none());
 }

@@ -23,23 +23,23 @@ pub struct Verification {
     pub local_objects: usize,
 }
 
-struct Geometry {
-    path: BezPath,
-    rule: FillRule,
-    bounds: Rect,
+pub(crate) struct Geometry {
+    pub(crate) path: BezPath,
+    pub(crate) rule: FillRule,
+    pub(crate) bounds: Rect,
 }
-struct Surface {
-    id: NodeId,
-    geometry: Arc<Geometry>,
-    clips: Vec<Arc<Geometry>>,
+pub(crate) struct Surface {
+    pub(crate) id: NodeId,
+    pub(crate) geometry: Arc<Geometry>,
+    pub(crate) clips: Vec<Arc<Geometry>>,
 }
-struct Scene {
-    surfaces: Vec<Surface>,
-    cache: BTreeMap<NodeId, Arc<Geometry>>,
-    elements: usize,
+pub(crate) struct Scene {
+    pub(crate) surfaces: Vec<Surface>,
+    pub(crate) cache: BTreeMap<NodeId, Arc<Geometry>>,
+    pub(crate) elements: usize,
 }
 
-fn overlaps(a: Rect, b: Rect) -> bool {
+pub(crate) fn overlaps(a: Rect, b: Rect) -> bool {
     a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
 }
 
@@ -127,7 +127,7 @@ impl Scene {
         Ok(())
     }
 
-    fn owner(&self, p: Point) -> Option<NodeId> {
+    pub(crate) fn owner(&self, p: Point) -> Option<NodeId> {
         self.surfaces.iter().rev().find(|s| s.geometry.contains(p) && s.clips.iter().all(|c| c.contains(p))).map(|s| s.id)
     }
 }
@@ -135,25 +135,7 @@ impl Scene {
 /// Checks only the requested pair and region, including original clip contours.
 /// Unknown compositing is a conservative blocker inherited from source attribution.
 pub fn verify(doc: &Document, ids: [NodeId; 2], region: Rect) -> Result<Verification, String> {
-    if ids[0] == ids[1]
-        || ![region.x0, region.y0, region.x1, region.y1].iter().all(|v| v.is_finite() && v.abs() <= 1e9)
-        || region.width() <= 0.0
-        || region.height() <= 0.0
-        || region.width() > 100_000.0
-        || region.height() > 100_000.0
-    {
-        return Err("Elige dos objetos distintos y una región finita de tamaño positivo.".into());
-    }
-    crate::technical::check_art(doc)?;
-    let (mapped, sources) = crate::sources::prepare(doc);
-    let known: BTreeSet<_> = sources.iter().map(|s| s.id).collect();
-    if ids.iter().any(|id| !known.contains(id)) {
-        return Err("Este par requiere dos sólidos opacos visibles, sin trazo, máscara ni sobreimpresión.".into());
-    }
-    let mut scene = Scene { surfaces: Vec::new(), cache: BTreeMap::new(), elements: 0 };
-    for n in &mapped.layers {
-        scene.collect(n, region.inflate(0.01, 0.01), &[])?;
-    }
+    let (scene, known) = local_scene(doc, ids, region)?;
     let mut candidates = BTreeSet::new();
     for s in &scene.surfaces {
         if ids.contains(&s.id) {
@@ -253,4 +235,33 @@ pub fn verify(doc: &Document, ids: [NodeId; 2], region: Rect) -> Result<Verifica
         r.fragments_truncated = true;
     }
     Ok(r)
+}
+
+/// Shared bounded conservative scene; caller chooses its local halo.
+pub(crate) fn local_scene(doc: &Document, ids: [NodeId; 2], region: Rect) -> Result<(Scene, BTreeSet<NodeId>), String> {
+    validate_region(ids, region)?;
+    crate::technical::check_art(doc)?;
+    let (mapped, sources) = crate::sources::prepare(doc);
+    let known: BTreeSet<_> = sources.iter().map(|s| s.id).collect();
+    if ids.iter().any(|id| !known.contains(id)) {
+        return Err("Este par requiere dos sólidos opacos visibles, sin trazo, máscara ni sobreimpresión.".into());
+    }
+    let mut scene = Scene { surfaces: Vec::new(), cache: BTreeMap::new(), elements: 0 };
+    for n in &mapped.layers {
+        scene.collect(n, region.inflate(0.01, 0.01), &[])?;
+    }
+    Ok((scene, known))
+}
+
+pub(crate) fn validate_region(ids: [NodeId; 2], region: Rect) -> Result<(), String> {
+    if ids[0] == ids[1]
+        || ![region.x0, region.y0, region.x1, region.y1].iter().all(|v| v.is_finite() && v.abs() <= 1e9)
+        || region.width() <= 0.0
+        || region.height() <= 0.0
+        || region.width() > 100_000.0
+        || region.height() > 100_000.0
+    {
+        return Err("Elige dos objetos distintos y una región finita de tamaño positivo.".into());
+    }
+    Ok(())
 }

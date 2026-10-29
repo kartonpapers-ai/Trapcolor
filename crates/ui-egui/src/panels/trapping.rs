@@ -66,6 +66,20 @@ struct CurveCheck {
     report: Value,
 }
 
+struct LocalPreview {
+    check: Arc<CurveCheck>,
+    width_mm: f64,
+    reverse: bool,
+    report: Value,
+    texture: egui::TextureHandle,
+    overlay: egui::TextureHandle,
+}
+impl std::fmt::Debug for LocalPreview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalPreview").field("width_mm", &self.width_mm).field("reverse", &self.reverse).finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -104,6 +118,12 @@ pub struct Settings {
     boundary_selected: Option<usize>,
     #[serde(skip)]
     curves: Option<Arc<CurveCheck>>,
+    pub preview_width_mm: f64,
+    pub preview_reverse: bool,
+    pub preview_zoom: f32,
+    pub preview_show: bool,
+    #[serde(skip)]
+    preview: Option<Arc<LocalPreview>>,
 }
 
 impl Default for Settings {
@@ -132,12 +152,25 @@ impl Default for Settings {
             boundary_page: 0,
             boundary_selected: None,
             curves: None,
+            preview_width_mm: 0.1,
+            preview_reverse: false,
+            preview_zoom: 1.0,
+            preview_show: true,
+            preview: None,
         }
     }
 }
 
 impl Settings {
     fn sanitize(&mut self) {
+        if !self.preview_width_mm.is_finite() {
+            self.preview_width_mm = 0.1;
+        }
+        if !self.preview_zoom.is_finite() {
+            self.preview_zoom = 1.0;
+        }
+        self.preview_width_mm = self.preview_width_mm.clamp(0.01, 0.5);
+        self.preview_zoom = self.preview_zoom.clamp(1.0, 16.0);
         if !self.width_mm.is_finite() {
             self.width_mm = 0.1;
         }
@@ -217,6 +250,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         clear_capture(ui, &mut settings);
         settings.boundaries = None;
         settings.curves = None;
+        settings.preview = None;
         settings.boundary_selected = None;
         settings.analysis = None;
         settings.message.clear();
@@ -563,6 +597,13 @@ fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
     let curves = settings.curves.as_ref();
     let curves_current = curves
         .is_some_and(|c| boundaries_current && boundaries.is_some_and(|b| Arc::ptr_eq(b, &c.boundary)) && settings.boundary_selected == Some(c.zone));
+    let preview = settings.preview.as_ref();
+    let preview_current = preview.is_some_and(|p| {
+        curves_current
+            && curves.is_some_and(|c| Arc::ptr_eq(c, &p.check))
+            && p.width_mm == settings.preview_width_mm
+            && p.reverse == settings.preview_reverse
+    });
     let snapshot = match vectorcraft_engine::cmd::trapping::snapshot(&app.session) {
         Ok(v) => json!({"status":"available","report":v}),
         Err(e) => json!({"status":"error","message":e.to_string()}),
@@ -575,17 +616,19 @@ fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
             "sourceFormat":st.format,"activeArtboard":artboard,"artboards":doc.artboards.iter().take(100).collect::<Vec<_>>(),"artboardsTruncated":doc.artboards.len()>100},
         "colorSettings":colors,"plates":plates.iter().map(|p|json!({"name":p.name,"spot":p.spot})).collect::<Vec<_>>(),
         "settings":{"trapping":settings.params(),"capture":{"dpi":settings.capture_dpi,"plate":plate},
-            "boundaries":{"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"minPixels":4}},
+            "boundaries":{"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"minPixels":4},"preview":{"widthMm":settings.preview_width_mm,"reverse":settings.preview_reverse}},
         "panelStatus":{"failed":settings.failed,"message":settings.message},
         "selection":snapshot,"objects":object_samples(doc),
         "analyses":{"contacts":cached(analysis.is_some(),contacts_current,analysis.map(|a|&a.report)),
             "capture":cached(capture.is_some(),capture_current,capture.map(|c|&c.report)),
             "boundaries":cached(boundaries.is_some(),boundaries_current,boundaries.map(|c|&c.report)),
-            "curves":cached(curves.is_some(),curves_current,curves.map(|c|&c.report))},
-        "fullGeometryIncluded":false,"imageBytesIncluded":false,"localCurveSamplesIncluded":curves_current,
+            "curves":cached(curves.is_some(),curves_current,curves.map(|c|&c.report)),
+            "preview":cached(preview.is_some(),preview_current,preview.map(|p|&p.report))},
+        "fullGeometryIncluded":false,"imageBytesIncluded":false,"localCurveSamplesIncluded":curves_current,"localPreviewGeometryIncluded":preview_current,
         "notes":["Diagnóstico de solo lectura. Para reproducir el trabajo completo se necesita también el archivo original.",
             "Solo se incluyen informes vigentes ya calculados; no se recalculan contactos, capturas ni fronteras. notAvailable también puede significar que un informe se invalidó y se descartó.",
             "Las curvas pueden incluir fragmentos locales muestreados en puntos; no son contornos completos ni geometría de trapping.",
+            "La previsualización puede incluir geometría local temporal de una franja; no son objetos incorporados al documento ni una prueba de impresión.",
             "Las zonas de frontera son candidatos experimentales, no confirmaciones ni objetos de trapping. Se conservan las advertencias y los límites de sus informes."]
     }))
 }
@@ -735,6 +778,7 @@ fn choose_zone(app: &mut VectorcraftApp, settings: &mut Settings, c: &BoundaryCa
     };
     settings.boundary_selected = Some(index);
     settings.curves = None;
+    settings.preview = None;
     let ids: std::collections::BTreeSet<_> = zone["attribution"]["pairs"]
         .as_array()
         .into_iter()
@@ -771,6 +815,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
     if stale {
         settings.boundaries = None;
         settings.curves = None;
+        settings.preview = None;
         settings.boundary_selected = None;
         settings.message = "El documento o los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
         settings.failed = false;
@@ -783,6 +828,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
         if before != (settings.boundary_dpi, settings.boundary_contrast) {
             settings.boundaries = None;
             settings.curves = None;
+            settings.preview = None;
             settings.boundary_selected = None;
             settings.message = "Los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
             settings.failed = false;
@@ -790,6 +836,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
         if ui.add_enabled(app.session.active().is_some(), egui::Button::new("Detectar fronteras")).clicked() {
             settings.boundaries = None;
             settings.curves = None;
+            settings.preview = None;
             settings.boundary_selected = None;
             let result =
                 app.run("trapping.boundaries", json!({"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"artboard":artboard}));
@@ -995,6 +1042,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                             }
                             if ui.button(format!("Verificar curvas del par {}", pair_index + 1)).clicked() {
                                 settings.curves = None;
+                                settings.preview = None;
                                 match app.run("trapping.verifyCurves", json!({"ids":pair["ids"],"region":zone["bounds"]})) {
                                     Ok(report) => {
                                         settings.curves = Some(Arc::new(CurveCheck { boundary: c.clone(), zone: index, pair: pair_index, report }));
@@ -1010,7 +1058,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                         }
                     });
                 }
-                if let Some(check) = settings.curves.as_ref().filter(|v| v.zone == index && Arc::ptr_eq(&v.boundary, &c)) {
+                if let Some(check) = settings.curves.clone().filter(|v| v.zone == index && Arc::ptr_eq(&v.boundary, &c)) {
                     ui.strong(format!("Curvas del par {}", check.pair + 1));
                     let r = &check.report;
                     let found = r["visibleSamples"].as_u64().unwrap_or(0);
@@ -1030,6 +1078,9 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                         ui.label("El mapa resume los fragmentos comprobados para mantener la revisión ágil.");
                     }
                     ui.label("Verde = muestras de la curva; no es un trap de 0,10 mm. Tolerancia de sondeo: 0,0001 mm.");
+                    if found > 0 {
+                        local_preview_section(app, ui, settings, &check);
+                    }
                 }
             }
             if c.report["zonesTruncated"] == true {
@@ -1168,5 +1219,102 @@ mod source_picking_tests {
         assert_eq!(zone_at(&map, 10, 10, 6, 2), Some(1));
         assert_eq!(zone_at(&map, 10, 10, 8, 8), None);
         assert_eq!(zone_at(&map, 10, 10, -4, 0), None);
+    }
+}
+
+fn preview_textures(ui: &Ui, report: &Value) -> Result<(egui::TextureHandle, egui::TextureHandle), String> {
+    let load = |key: &str| -> Result<image::RgbaImage, String> {
+        let bytes = report[key].as_str().and_then(vectorcraft_format::base64_decode).ok_or("No se pudo leer la previsualización.")?;
+        image::load_from_memory(&bytes).map(|im| im.to_rgba8()).map_err(|e| e.to_string())
+    };
+    let base = load("dataBase64")?;
+    let overlay = load("overlayBase64")?;
+    let limit = ui.ctx().input(|i| i.max_texture_side).max(1);
+    if base.dimensions() != overlay.dimensions() || base.width() as usize > limit || base.height() as usize > limit {
+        return Err(format!("La previsualización supera el límite gráfico de {limit} píxeles por lado."));
+    }
+    let texture = |name, pixels: &image::RgbaImage| {
+        ui.ctx().load_texture(
+            name,
+            egui::ColorImage::from_rgba_unmultiplied([pixels.width() as usize, pixels.height() as usize], pixels.as_raw()),
+            egui::TextureOptions::NEAREST,
+        )
+    };
+    Ok((texture("kx27-preview-base", &base), texture("kx27-preview-band", &overlay)))
+}
+
+fn local_preview_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settings, check: &Arc<CurveCheck>) {
+    widgets::divider(ui);
+    ui.strong("Previsualización local de trapping");
+    ui.label("Revisa la franja antes de crear objetos. Esta vista no modifica el documento.");
+    let before = (settings.preview_width_mm, settings.preview_reverse);
+    number(ui, "Ancho de previsualización", &mut settings.preview_width_mm, 0.01..=0.5, " mm");
+    ui.checkbox(&mut settings.preview_reverse, "Invertir origen y receptor");
+    let mut ids = check.report["ids"].as_array().cloned().unwrap_or_default();
+    if settings.preview_reverse {
+        ids.reverse();
+    }
+    let label = |id: Option<&Value>| id.and_then(Value::as_u64).and_then(|id| check.boundary.source_labels.get(&id)).cloned().unwrap_or_default();
+    ui.label(format!("Origen: {}", label(ids.first())));
+    ui.label(format!("Receptor: {}", label(ids.get(1))));
+    let stale = settings
+        .preview
+        .as_ref()
+        .is_some_and(|p| !Arc::ptr_eq(&p.check, check) || p.width_mm != settings.preview_width_mm || p.reverse != settings.preview_reverse);
+    if stale || before != (settings.preview_width_mm, settings.preview_reverse) {
+        settings.preview = None;
+    }
+    if ui.button("Previsualizar franja").clicked() {
+        settings.preview = None;
+        let result = (|| {
+            let mut report =
+                app.run("trapping.previewLocal", json!({"ids":ids,"region":check.report["region"],"widthMm":settings.preview_width_mm}))?;
+            let (texture, overlay) = preview_textures(ui, &report)?;
+            if let Some(obj) = report.as_object_mut() {
+                obj.remove("dataBase64");
+                obj.remove("overlayBase64");
+            }
+            Ok::<_, String>(LocalPreview {
+                check: check.clone(),
+                width_mm: settings.preview_width_mm,
+                reverse: settings.preview_reverse,
+                report,
+                texture,
+                overlay,
+            })
+        })();
+        match result {
+            Ok(preview) => {
+                settings.preview = Some(Arc::new(preview));
+                settings.failed = false;
+                settings.message = "Franja temporal lista. No se crearon objetos de trapping.".into();
+            }
+            Err(e) => {
+                settings.failed = true;
+                settings.message = e;
+            }
+        }
+    }
+    if let Some(preview) = settings.preview.clone() {
+        ui.label(format!("Franja temporal · {:.2} mm", preview.width_mm));
+        ui.checkbox(&mut settings.preview_show, "Mostrar franja resaltada");
+        ui.add(egui::Slider::new(&mut settings.preview_zoom, 1.0..=16.0).text("Ampliar franja"));
+        let width = ui.available_width().max(1.0) * settings.preview_zoom;
+        let size = egui::vec2(width, width * preview.texture.size()[1] as f32 / preview.texture.size()[0].max(1) as f32);
+        egui::ScrollArea::both().id_salt("local-trap-preview").max_height(280.0).show(ui, |ui| {
+            let response = ui.add(egui::Image::new((preview.texture.id(), size)));
+            if settings.preview_show {
+                ui.painter().image(
+                    preview.overlay.id(),
+                    response.rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    Tokens::get(ui.ctx()).accent,
+                );
+            }
+        });
+        ui.label("Resaltado = franja geométrica; no representa el color de sobreimpresión. Desactívalo para comparar con el original.");
+        ui.label(format!("{} tramos originales · {} intervalos revisados", preview.report["originalCurveRuns"], preview.report["testedIntervals"]));
+        ui.label("Uniones redondas y extremos rectos. El muestreo puede omitir detalles o extremos pequeños; la zona limita el contacto revisado.");
+        ui.label("Puedes exportar el diagnóstico JSON con esta franja. Aplicar a la selección sigue usando el cálculo anterior.");
     }
 }

@@ -20,6 +20,7 @@ mod lru;
 mod paint;
 pub mod sources;
 pub mod technical;
+pub mod trap_preview;
 pub use paint::decode_failures;
 mod pattern;
 pub mod placed_document;

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use vectorcraft_color::{BlendMode, Color, Paint, gradient::GradientKind};
 use vectorcraft_doc::{Appearance, AppearanceItem, Document, FillLayer, ImageObject, Node, NodeKind};
-use vectorcraft_geom::Rect;
+use vectorcraft_geom::{Rect, Shape};
 use vectorcraft_plugins::objects;
 use vectorcraft_trapping::{Modo, Opciones, PT_POR_MM, analizar_con, atrapar_con, leer_ajuste};
 
@@ -664,6 +664,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "trapping.previewLocal", "Preview Local Trapping Band", [], None,
+            "{ids:[source,receiver], region:[x0,y0,x1,y1] points, widthMm?:0.01..0.5 (0.1)} → bounded temporary original-curve band and highlighted raster; opaque solid fills and linked spots only; sampled contact gating, visible receiver clipping; no document, history or selection edits and no Apply integration",has_doc,preview_local),
         cmd!(query "trapping.verifyCurves", "Verify Local Original Curves", [], None,
             "{ids:[two distinct source IDs], region:[x0,y0,x1,y1] in points} → {experimental, ids, region, status, testedSamples, visibleSamples, occludedSamples, gapSamples, unresolvedSamples, truncated, fragments, fragmentsTruncated, stepMm, probeMm, localObjects, warnings}; read-only bounded numerical checks of original fill curves and clips, conservative opaque-solid visibility; not a full contact proof, trap decision or trap geometry",has_doc,verify_curves),
         cmd!(query "trapping.boundaries", "Detect Visible Ink Boundary Candidates", [], None,
@@ -824,4 +826,46 @@ fn verify_curves(s: &mut Session, p: &Value) -> Result<Value> {
             "Exige los dos sólidos a ambos lados a 0,0001 mm y 0,002 mm del contorno. Detalles entre sondeos o menores que la tolerancia pueden perderse.",
             "Imágenes, degradados, trazos, máscaras y sobreimpresión bloquean conservadoramente su caja. Un resultado incompleto no confirma ausencia de contacto.",
             "Los fragmentos verdes aproximan por puntos las curvas comprobadas; no representan el ancho de 0,10 mm ni son geometría nueva del documento."]}))
+}
+
+fn preview_local(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "trapping.previewLocal";
+    let a = p["ids"].as_array().filter(|a| a.len() == 2).ok_or_else(|| bad(C, "Indica [origen, receptor]."))?;
+    let read = |i| a.get(i).and_then(Value::as_u64).map(NodeId).ok_or_else(|| bad(C, "Los IDs deben ser enteros positivos."));
+    let ids = [read(0)?, read(1)?];
+    if p.get("region").is_none_or(|v| !v.is_array()) {
+        return Err(bad(C, "Indica la región de la zona."));
+    }
+    let width = match p.get("widthMm") {
+        None => 0.1,
+        Some(v) => v.as_f64().ok_or_else(|| bad(C, "El ancho debe ser numérico."))?,
+    };
+    let doc = &s.doc()?.doc;
+    let requested = capture_region(doc, p, C)?;
+    let r = vectorcraft_render::trap_preview::preview(doc, ids, requested, width).map_err(|e| bad(C, e))?;
+    let paint = doc
+        .node(ids[0])
+        .and_then(|n| {
+            n.appearance
+                .items
+                .iter()
+                .find(|i| i.visible() && i.opacity() > 0.0 && matches!(i, AppearanceItem::Fill(_)) && !matches!(i.paint(), Paint::None))
+        })
+        .map(|i| i.paint());
+    let b = r.band.to_bezpath().bounding_box();
+    Ok(json!({"experimental":true,"status":"previewOnly","ids":ids,"widthMm":width,
+        "requestedRegion":[requested.x0,requested.y0,requested.x1,requested.y1],
+        "region":[r.region.x0,r.region.y0,r.region.x1,r.region.y1],"dpi":r.dpi,
+        "width":r.base.width,"height":r.base.height,
+        "dataBase64":vectorcraft_format::base64_encode(&r.base.to_png().map_err(|e|bad(C,e))?),
+        "overlayBase64":vectorcraft_format::base64_encode(&r.overlay.to_png().map_err(|e|bad(C,e))?),
+        "bandPath":r.band.to_bezpath().to_svg(),"bandBounds":[b.x0,b.y0,b.x1,b.y1],
+        "bandAnchors":r.band.subpaths.iter().map(|s|s.anchors.len()).sum::<usize>(),
+        "originalCurveRuns":r.runs.len(),"testedIntervals":r.tested,"checksPerInterval":5,
+        "localObjects":r.local_objects,"sourcePaint":paint,"plannedOverprint":true,
+        "warnings":["Previsualización temporal; no crea objetos ni sustituye Aplicar a la selección.",
+        "Tramos de curvas originales comprobados por cinco sondeos por intervalo de hasta 0,05 mm. No prueba contacto continuo; puede omitir extremos o detalles entre sondeos.",
+        "Franja de ancho nominal, uniones redondas y extremos rectos, recortada al receptor visible. En esquinas, extremos y zonas estrechas el área resultante depende del recorte.",
+        "El resaltado indica geometría, no el color de sobreimpresión. Imágenes, degradados, máscaras y otras composiciones bloquean su caja; no es una prueba RIP.",
+        "La región limita los tramos analizados; sus extremos de corte no son extremos completos del contacto. Hasta 32 superficies, 1.024 anclas de entrada y 4.096 anclas de salida."]}))
 }
