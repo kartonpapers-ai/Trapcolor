@@ -262,6 +262,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let snapshot = vectorcraft_engine::cmd::trapping::snapshot(&app.session).ok();
     let artwork = snapshot.as_ref().and_then(|v| v["artwork"].as_u64()).unwrap_or(0);
     let pairs = snapshot.as_ref().and_then(|v| v["pairs"].as_array()).cloned().unwrap_or_default();
+    let local_traps = snapshot.as_ref().and_then(|v| v["localTraps"].as_array()).cloned().unwrap_or_default();
     let ids = snapshot.as_ref().map(|v| v["ids"].clone()).unwrap_or_else(|| json!([]));
     let can_apply = doc_uid.is_some() && artwork >= 2;
 
@@ -453,8 +454,18 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         widgets::divider(ui);
     }
     widgets::section_header(ui, "Traps de la selección");
-    if pairs.is_empty() {
+    if pairs.is_empty() && local_traps.is_empty() {
         ui.label("Aplica trapping para ver y ajustar las parejas de tintas.");
+    }
+    for trap in &local_traps {
+        ui.strong("Franja local incorporada");
+        ui.label(trap["name"].as_str().unwrap_or("Trap local"));
+        if trap["overprint"] == true {
+            ui.label("Tinta de origen en sobreimpresión. Guardada en la capa de trapping local.");
+        } else {
+            ui.label("Sobreimpresión desactivada: revisa el relleno de esta franja local.");
+        }
+        ui.label("Puedes deshacerla con Edición > Deshacer. Para sustituirla, elimina la anterior y vuelve a previsualizar.");
     }
     for pair in &pairs {
         let Some(id) = pair["id"].as_u64() else { continue };
@@ -1315,6 +1326,28 @@ fn local_preview_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut S
         ui.label("Resaltado = franja geométrica; no representa el color de sobreimpresión. Desactívalo para comparar con el original.");
         ui.label(format!("{} tramos originales · {} intervalos revisados", preview.report["originalCurveRuns"], preview.report["testedIntervals"]));
         ui.label("Uniones redondas y extremos rectos. El muestreo puede omitir detalles o extremos pequeños; la zona limita el contacto revisado.");
-        ui.label("Puedes exportar el diagnóstico JSON con esta franja. Aplicar a la selección sigue usando el cálculo anterior.");
+        ui.label(
+            "Incorporar crea esta franja con la tinta de origen en sobreimpresión, en una capa de trapping local. Se puede deshacer en un paso.",
+        );
+        if ui.button("Incorporar esta franja").clicked() {
+            match app.run("trapping.incorporateLocal", json!({"previewId":preview.report["previewId"]})) {
+                Ok(_) => {
+                    settings.preview = None;
+                    settings.curves = None;
+                    settings.boundaries = None;
+                    settings.boundary_selected = None;
+                    settings.analysis = None;
+                    clear_capture(ui, settings);
+                    settings.failed = false;
+                    settings.message = "Franja incorporada en KX27 · Trapping local, con sobreimpresión. Puedes deshacer en un paso.".into();
+                }
+                Err(e) => {
+                    settings.failed = true;
+                    settings.message = e;
+                    settings.preview = None;
+                }
+            }
+        }
+        ui.label("Puedes exportar el diagnóstico JSON. Aplicar a la selección conserva su cálculo anterior.");
     }
 }

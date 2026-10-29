@@ -65,7 +65,7 @@ fn eligible(n: &Node) -> bool {
     if !simple(n) || !matches!(n.kind, NodeKind::Path { guide: false, .. } | NodeKind::Compound { .. }) {
         return false;
     }
-    if n.extras().attrs.as_ref().is_some_and(|a| a.data.iter().any(|(k, _)| k.starts_with("kx27-trap-v1-"))) {
+    if n.extras().attrs.as_ref().is_some_and(|a| a.data.iter().any(|(k, _)| k.starts_with("kx27-trap-v1-") || k == "kx27-local-trap-v1")) {
         return false;
     }
     let mut items = n.appearance.items.iter().filter(|i| active(i));

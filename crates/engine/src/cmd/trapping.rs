@@ -10,6 +10,8 @@ use vectorcraft_plugins::objects;
 use vectorcraft_trapping::{Modo, Opciones, PT_POR_MM, analizar_con, atrapar_con, leer_ajuste};
 
 use super::*;
+mod local;
+pub(crate) use local::PreparedLocalTrap;
 
 const APPLY: &str = "trapping.apply";
 const META: &str = "kx27-trap-v1";
@@ -314,10 +316,15 @@ fn info(s: &Session, p: &Value) -> Result<Value> {
     };
     let mut pairs = Vec::new();
     let mut artwork = 0;
+    let mut local_traps = Vec::new();
     let mut gradients = 0;
     let mut images = 0;
     for id in &ids {
         let Some(n) = st.doc.node(*id) else { continue };
+        if let Some(record) = local::record(n) {
+            local_traps.push(json!({"id":id,"name":n.display_name(),"record":record,"overprint":n.appearance.items.iter().any(|i|i.overprint())}));
+            continue;
+        }
         match control_name(n).and_then(leer_ajuste) {
             Some(Ok(Some(a))) => pairs.push(json!({
                 "id": id.0, "name": n.display_name(), "left": label(&a.izq, *id, "left"), "right": label(&a.der, *id, "right"), "leftKey": a.izq, "rightKey": a.der,
@@ -333,7 +340,7 @@ fn info(s: &Session, p: &Value) -> Result<Value> {
         }
     }
     Ok(
-        json!({"ids": selected.iter().map(|id| id.0).collect::<Vec<_>>(), "artwork": artwork, "gradients": gradients, "images": images, "pairs": pairs}),
+        json!({"ids": selected.iter().map(|id| id.0).collect::<Vec<_>>(), "artwork": artwork, "gradients": gradients, "images": images, "pairs": pairs, "localTraps":local_traps}),
     )
 }
 
@@ -354,6 +361,12 @@ fn validate(s: &Session, ids: &[NodeId]) -> Result<()> {
     let mut image_bytes = 0;
     for id in ids {
         let n = doc.node(*id).ok_or_else(|| bad(APPLY, "Un objeto ya no existe. Vuelve a seleccionarlo."))?;
+        if local::is_local(n) {
+            return Err(bad(
+                APPLY,
+                "Una franja local incorporada no se recalcula con Aplicar a la selección. Deshaz o elimina esa franja y vuelve a previsualizar.",
+            ));
+        }
         let control = control_name(n).and_then(leer_ajuste).is_some();
         if let Some((path, _, _)) = objects::geometry(n) {
             count += path.anchor_count();
@@ -664,6 +677,15 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(
+            "trapping.incorporateLocal",
+            "Incorporate Previewed Trapping Band",
+            [],
+            None,
+            "{previewId: opaque session ticket returned by trapping.previewLocal} → {status,id,layerId,source,receiver,widthMm,overprint}; commits the exact fresh prepared band in a managed top layer, preserving source paint/spot/tint; one undo step; rejects stale or consumed tickets, changed CMS, overlapping local pairs and unsuitable managed layers; selection becomes the trap",
+            has_doc,
+            local::incorporate
+        ),
         cmd!(query "trapping.previewLocal", "Preview Local Trapping Band", [], None,
             "{ids:[source,receiver], region:[x0,y0,x1,y1] points, widthMm?:0.01..0.5 (0.1)} → bounded temporary original-curve band and highlighted raster; opaque solid fills and linked spots only; sampled contact gating, visible receiver clipping; no document, history or selection edits and no Apply integration",has_doc,preview_local),
         cmd!(query "trapping.verifyCurves", "Verify Local Original Curves", [], None,
@@ -829,6 +851,7 @@ fn verify_curves(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn preview_local(s: &mut Session, p: &Value) -> Result<Value> {
+    s.local_trap_preview = None;
     const C: &str = "trapping.previewLocal";
     let a = p["ids"].as_array().filter(|a| a.len() == 2).ok_or_else(|| bad(C, "Indica [origen, receptor]."))?;
     let read = |i| a.get(i).and_then(Value::as_u64).map(NodeId).ok_or_else(|| bad(C, "Los IDs deben ser enteros positivos."));
@@ -851,9 +874,10 @@ fn preview_local(s: &mut Session, p: &Value) -> Result<Value> {
                 .iter()
                 .find(|i| i.visible() && i.opacity() > 0.0 && matches!(i, AppearanceItem::Fill(_)) && !matches!(i.paint(), Paint::None))
         })
-        .map(|i| i.paint());
+        .map(|i| i.paint().clone())
+        .ok_or_else(|| bad(C, "No se pudo leer la tinta de origen."))?;
     let b = r.band.to_bezpath().bounding_box();
-    Ok(json!({"experimental":true,"status":"previewOnly","ids":ids,"widthMm":width,
+    let mut report = json!({"experimental":true,"status":"previewOnly","ids":ids,"widthMm":width,
         "requestedRegion":[requested.x0,requested.y0,requested.x1,requested.y1],
         "region":[r.region.x0,r.region.y0,r.region.x1,r.region.y1],"dpi":r.dpi,
         "width":r.base.width,"height":r.base.height,
@@ -862,10 +886,13 @@ fn preview_local(s: &mut Session, p: &Value) -> Result<Value> {
         "bandPath":r.band.to_bezpath().to_svg(),"bandBounds":[b.x0,b.y0,b.x1,b.y1],
         "bandAnchors":r.band.subpaths.iter().map(|s|s.anchors.len()).sum::<usize>(),
         "originalCurveRuns":r.runs.len(),"testedIntervals":r.tested,"checksPerInterval":5,
-        "localObjects":r.local_objects,"sourcePaint":paint,"plannedOverprint":true,
+        "localObjects":r.local_objects,"sourcePaint":paint.clone(),"plannedOverprint":true,
         "warnings":["Previsualización temporal; no crea objetos ni sustituye Aplicar a la selección.",
         "Tramos de curvas originales comprobados por cinco sondeos por intervalo de hasta 0,05 mm. No prueba contacto continuo; puede omitir extremos o detalles entre sondeos.",
         "Franja de ancho nominal, uniones redondas y extremos rectos, recortada al receptor visible. En esquinas, extremos y zonas estrechas el área resultante depende del recorte.",
         "El resaltado indica geometría, no el color de sobreimpresión. Imágenes, degradados, máscaras y otras composiciones bloquean su caja; no es una prueba RIP.",
-        "La región limita los tramos analizados; sus extremos de corte no son extremos completos del contacto. Hasta 32 superficies, 1.024 anclas de entrada y 4.096 anclas de salida."]}))
+        "La región limita los tramos analizados; sus extremos de corte no son extremos completos del contacto. Hasta 32 superficies, 1.024 anclas de entrada y 4.096 anclas de salida."]});
+    let ticket = local::remember(s, ids, requested, width, r.band, paint)?;
+    report["previewId"] = json!(ticket);
+    Ok(report)
 }

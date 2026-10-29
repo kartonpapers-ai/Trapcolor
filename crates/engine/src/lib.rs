@@ -1023,6 +1023,9 @@ pub struct Session {
     untitled_counter: u32,
     /// Session-level state of the menu commands (saved selections, guide lock).
     pub(crate) menu: cmd::menucmds::MenuState,
+    /// One bounded local trapping band, committed only while its original document is current.
+    pub(crate) local_trap_preview: Option<Arc<cmd::trapping::PreparedLocalTrap>>,
+    pub(crate) local_trap_sequence: u64,
     /// The selected gradient stop (`gradient.selectStop`) and whose gradient it was selected on,
     /// shared by the Gradient tool's annotator, the Gradient and Color panels and agents: read it
     /// with [`Session::selected_stop`].
@@ -1126,6 +1129,8 @@ impl Session {
             draw_inside: None,
             untitled_counter: 0,
             menu: Default::default(),
+            local_trap_preview: None,
+            local_trap_sequence: 0,
             gradient_stop: None,
             active_appearance_item: None,
             last_solid: Color::WHITE,

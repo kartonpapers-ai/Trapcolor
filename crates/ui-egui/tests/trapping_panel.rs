@@ -76,6 +76,9 @@ fn trapping_panel_visual_capture() {
     std::fs::create_dir_all(&dir).unwrap();
     for (theme, width) in [(vectorcraft_ui_egui::theme::Brightness::MediumDark, 340.0), (vectorcraft_ui_egui::theme::Brightness::Light, 280.0)] {
         let mut app = if std::env::var("KX27_IMAGE_CAPTURE").is_ok() { image_app().0 } else { app() };
+        if std::env::var("KX27_INCORPORATE_CAPTURE").is_ok() {
+            print_pair(&mut app);
+        }
         if std::env::var("KX27_GRADIENT_CAPTURE").is_ok() {
             let id = app.session.doc().unwrap().selection.objects[0].0;
             app.run(
@@ -169,6 +172,13 @@ fn trapping_panel_visual_capture() {
             assert!(count > 10, "verified samples must remain visibly green in both themes: {count}");
         }
         rendered.save(std::path::Path::new(&dir).join(format!("trapping-{}-{width}.png", theme.id()))).unwrap();
+        if std::env::var("KX27_INCORPORATE_CAPTURE").is_ok() {
+            h.get_by_label("Incorporar esta franja").click();
+            h.run_steps(4);
+            assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+            h.get_by_label("Franja local incorporada");
+            h.render().unwrap().save(std::path::Path::new(&dir).join(format!("trapping-incorporated-{}-{width}.png", theme.id()))).unwrap();
+        }
     }
 }
 
@@ -789,4 +799,77 @@ fn local_band_preview_is_read_only_directional_and_exports_only_fresh_geometry()
     assert_eq!(stale["analyses"]["preview"]["status"], "stale");
     h.run_steps(4);
     assert!(h.query_by_label("Previsualizar franja").is_none());
+}
+
+#[test]
+fn incorporate_button_creates_the_reviewed_band_exports_metadata_and_undoes_once() {
+    let mut app = app();
+    print_pair(&mut app);
+    let files = diagnostic_download(&mut app);
+    let original = app.session.doc().unwrap().doc.clone();
+    let undo = app.session.doc().unwrap().history.undo.len();
+    let mut ready = false;
+    let mut h = Harness::builder().with_size(egui::vec2(340.0, 3000.0)).build_ui_state(
+        move |ui, app: &mut VectorcraftApp| {
+            if !ready {
+                vectorcraft_ui_egui::theme::install_fonts(ui.ctx());
+                egui_extras::install_image_loaders(ui.ctx());
+                ready = true;
+                return;
+            }
+            show(app, ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Fronteras visibles · Fase 2").click();
+    h.run_steps(4);
+    h.get_by_label("Detectar fronteras").click();
+    h.run_steps(4);
+    h.get_by_label_contains("Zona 1 ·").click();
+    h.run_steps(4);
+    h.get_by_label("Verificar curvas del par 1").click();
+    h.run_steps(4);
+    assert!(h.query_by_label("Incorporar esta franja").is_none());
+    h.get_by_label("Previsualizar franja").click();
+    h.run_steps(4);
+    h.get_by_label("Exportar diagnóstico (.json)").click();
+    h.run_steps(4);
+    let preview: serde_json::Value = serde_json::from_slice(&files.borrow()[0].1).unwrap();
+    h.get_by_label("Incorporar esta franja").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.trapping.failed, "{}", h.state().ui.trapping.message);
+    h.get_by_label("Franja local incorporada");
+    assert!(h.query_by_label("Incorporar esta franja").is_none());
+    assert!(h.query_by_label("Previsualizar franja").is_none());
+    let st = h.state().session.doc().unwrap();
+    let id = st.selection.objects[0];
+    let trap = st.doc.node(id).unwrap();
+    assert_eq!(trap.path_data().unwrap().to_bezpath().to_svg(), preview["analyses"]["preview"]["report"]["bandPath"].as_str().unwrap());
+    assert!(trap.appearance.items[0].overprint());
+    assert_eq!(st.history.undo.len(), undo + 1);
+    for node in &original.layers {
+        assert_eq!(st.doc.node(node.id), Some(node.as_ref()));
+    }
+    h.get_by_label("Exportar diagnóstico (.json)").click();
+    h.run_steps(4);
+    let result: serde_json::Value = serde_json::from_slice(&files.borrow()[1].1).unwrap();
+    assert_eq!(result["selection"]["report"]["localTraps"][0]["id"], json!(id));
+    assert_eq!(result["selection"]["report"]["localTraps"][0]["record"]["widthMm"], 0.1);
+    assert_eq!(result["analyses"]["preview"]["status"], "notAvailable");
+    assert_eq!(result["localPreviewGeometryIncluded"], false);
+    h.state_mut().run("edit.undo", json!({})).unwrap();
+    h.run_steps(4);
+    assert_eq!(h.state().session.doc().unwrap().doc, original);
+    assert!(h.query_by_label("Franja local incorporada").is_none());
+    h.state_mut().run("edit.redo", json!({})).unwrap();
+    h.run_steps(4);
+    h.get_by_label("Franja local incorporada");
+}
+
+fn print_pair(app: &mut VectorcraftApp) {
+    let ids = app.session.doc().unwrap().selection.objects.clone();
+    for (i, id) in ids.iter().take(2).enumerate() {
+        app.run("paint.setFill", json!({"ids":[id],"color":{"model":"cmyk","c":if i==0 {1}else{0},"m":if i==1 {1}else{0},"y":0,"k":0}})).unwrap();
+    }
 }
