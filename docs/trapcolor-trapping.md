@@ -1,6 +1,27 @@
 # Project KX27: paleta de trapping
 
-Estado: incorporación de franjas locales revisadas, con tinta plana/proceso, sobreimpresión y deshacer, 2026-10-29. Se conservan la captura por tintas y el trapping de sólidos, spots, degradados lineales e imágenes opacas. No cambia la calificación alfa del editor.
+Estado: ventana de desarrollo guiada KX27.7, 2026-10-30, sobre el flujo de incorporación de franjas locales revisadas. Se conservan la captura por tintas y el trapping de sólidos, spots, degradados lineales e imágenes opacas. No cambia la calificación alfa del editor.
+
+## Ventana de desarrollo guiada
+
+Abre **Window / Ventana → Trapping · Desarrollo**, o pulsa **Abrir ventana de desarrollo** al principio de la paleta Trapping. Es una ventana flotante amplia, redimensionable y no modal: puedes seguir trabajando en el documento. Su apertura se guarda en preferencias. Mientras está abierta, la paleta habitual muestra un acceso a esta ventana; al cerrarla vuelven sus controles anteriores.
+
+El recorrido tiene seis pasos numerados:
+
+1. **Detectar:** calcula el mapa de candidatos con los ajustes de resolución y contraste. No necesitas seleccionar todo el arte.
+2. **Zona y par:** elige una zona y después un par de originales. Si hay varios pares, la elección es explícita; el mapa también permite elegir zonas. Los originales se resaltan en el documento.
+3. **Verificar curvas:** consulta las curvas del par elegido dentro de esa zona. Las muestras visibles permiten avanzar; no son una prueba continua de contacto ni una decisión automática de trapping.
+4. **Previsualizar:** revisa ancho, origen, receptor, sentido y franja temporal. Cambiar ancho o sentido invalida la franja y exige previsualizar otra vez.
+5. **Incorporar:** confirma la franja revisada. Este es el único paso del recorrido que modifica el dibujo; mantiene las mismas comprobaciones de tintas, vigencia y deshacer de la incorporación local.
+6. **Diagnóstico:** exporta el JSON, también después de un error. Tras incorporar muestra el resultado vigente y recuerda que Edición → Deshacer revierte esa incorporación en un paso.
+
+El botón principal permanece abajo junto a **Anterior**; el contenido y los avisos tienen desplazamiento propio. En ventanas estrechas, **Paso** sustituye la lista lateral. Zona, par e identidades de los originales acompañan la revisión: no se deducen de una selección posterior distinta. Solo se habilitan los pasos con sus requisitos disponibles.
+
+La ventana comparte capturas y consultas con la paleta. Cambiar el documento, arte, mesa o ajustes de color invalida los resultados correspondientes. Los controles no calculan geometría durante los fotogramas normales. El comando de interfaz `trapping.developmentWindow` acepta `{open?:bool}`; sin parámetro abre la ventana. `settings.development` añade al diagnóstico el paso, la zona/par vigentes y el estado de incorporación, sin adjuntar imágenes ni geometría completa del archivo.
+
+La prueba de mezcla de coberturas de tintas compartidas queda pendiente. Esta entrega organiza la interfaz; no modifica el motor ni permite reducir la cobertura de una tinta compartida. **Captura por tintas** y **Aplicar a la selección** siguen en la paleta habitual, al cerrar esta ventana; no forman parte del recorrido local nuevo.
+
+Validación: 7 pruebas del recorrido nuevo y 18 de la paleta existente; capturas nativas egui en temas claro/oscuro y tamaños 1280×800, 1024×700 y 700×560; compilación WASM. La ejecución completa de `cargo xtask ci` se detiene en avisos Clippy previos en `render/src/fx.rs` y `pdf/src/import_scan.rs`; no se atribuye un pase global de CI a esta entrega.
 
 ## Uso
 

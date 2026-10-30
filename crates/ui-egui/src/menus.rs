@@ -721,6 +721,12 @@ pub const UI_COMMANDS: &[(&str, &str, &str, &str)] = &[
         "{path?, scope?: selection|all (default selection), …css.selection options} css.export written to path, else a picked file (the web downloads it), with the pictures of rasterized art next to it (CSS Properties panel: Export Selected CSS…, Export All…) → {path, rules, images: [path…]}",
     ),
     (
+        "trapping.developmentWindow",
+        "Trapping · Desarrollo",
+        "",
+        "{open?: bool (true)} open or close the large modeless trapping development window; ordered detection, zone/pair, curves, preview, incorporation and diagnostic steps; UI only, no document edits",
+    ),
+    (
         "trapping.exportDiagnostic",
         "Exportar diagnóstico (.json)",
         "",
@@ -1415,6 +1421,13 @@ pub fn run_ui_command(app: &mut VectorcraftApp, id: &str, p: &Value) -> Option<R
         }),
         "css.copy" => crate::panels::css_properties::copy(app, p),
         "css.exportFile" => crate::panels::css_properties::export_file(app, p),
+        "trapping.developmentWindow" => match opt_bool(p, "open") {
+            Ok(open) => {
+                app.ui.trapping.development_window = open.unwrap_or(true);
+                Ok(json!(app.ui.trapping.development_window))
+            }
+            Err(e) => Err(e),
+        },
         "trapping.exportDiagnostic" => crate::panels::trapping::export_diagnostic(app, p),
         // File → Print…: its dialog; with params, print (or save the job as a PDF) without it.
         "file.print" if p.as_object().is_none_or(|o| o.is_empty()) => crate::dialogs::print::open(app),
@@ -1526,6 +1539,7 @@ pub fn checked(app: &VectorcraftApp, id: &str, p: &Value) -> Option<bool> {
             app.ui.floating_flyouts.iter().any(|f| f.tools.iter().any(|id| id == tool))
         }
         "window.taskBar" => app.ui.task_bar,
+        "trapping.developmentWindow" => app.ui.trapping.development_window,
         "window.taskBar.pin" => app.ui.task_bar_place.pinned,
         "window.panel" => {
             let panel = p.get("panel").and_then(Value::as_str).unwrap_or("");
@@ -2610,6 +2624,7 @@ pub fn menu_tree_named(english_names: bool) -> Vec<(&'static str, Vec<Item>)> {
             "Window",
             vec![
                 c("New Window", "window.newWindow"),
+                c("Trapping · Desarrollo", "trapping.developmentWindow"),
                 sub("Arrange", vec![todo("Cascade"), todo("Tile"), todo("Float in Window"), todo("Consolidate All Windows")]),
                 sub("Workspace", crate::workspaces::menu_items()),
                 Sep,

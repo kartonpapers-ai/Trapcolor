@@ -10,6 +10,9 @@ use vectorcraft_doc::Document;
 use crate::theme::Tokens;
 use crate::{VectorcraftApp, widgets};
 
+mod lab;
+pub use lab::show_window as show_development_window;
+
 pub const ID: &str = "trapping";
 const DIRECTIONS: [&str; 3] = ["Claro hacia oscuro", "Invertida", "Centrada"];
 const DIRECTION_IDS: [&str; 3] = ["auto", "reverse", "center"];
@@ -124,6 +127,9 @@ pub struct Settings {
     pub preview_show: bool,
     #[serde(skip)]
     preview: Option<Arc<LocalPreview>>,
+    pub development_window: bool,
+    #[serde(skip)]
+    lab: lab::State,
 }
 
 impl Default for Settings {
@@ -157,6 +163,8 @@ impl Default for Settings {
             preview_zoom: 1.0,
             preview_show: true,
             preview: None,
+            development_window: false,
+            lab: lab::State::default(),
         }
     }
 }
@@ -246,18 +254,20 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let mut settings = app.ui.trapping.clone();
     settings.sanitize();
     let doc_uid = app.session.active().map(|st| st.uid);
-    if settings.document != doc_uid {
-        clear_capture(ui, &mut settings);
-        settings.boundaries = None;
-        settings.curves = None;
-        settings.preview = None;
-        settings.boundary_selected = None;
-        settings.analysis = None;
-        settings.message.clear();
-        settings.failed = false;
-        settings.export_message.clear();
-        settings.export_failed = false;
-        settings.document = doc_uid;
+    sync_document(app, ui, &mut settings);
+
+    if ui.button("Abrir ventana de desarrollo").clicked() {
+        app.ui.trapping = settings.clone();
+        if let Err(e) = app.run("trapping.developmentWindow", json!({"open":true})) {
+            settings.failed = true;
+            settings.message = e;
+        }
+        settings.development_window = app.ui.trapping.development_window;
+    }
+    if settings.development_window {
+        ui.label("El flujo guiado está abierto en Trapping · Desarrollo.");
+        app.ui.trapping = settings;
+        return;
     }
     let snapshot = vectorcraft_engine::cmd::trapping::snapshot(&app.session).ok();
     let artwork = snapshot.as_ref().and_then(|v| v["artwork"].as_u64()).unwrap_or(0);
@@ -626,7 +636,7 @@ fn diagnostic(app: &VectorcraftApp) -> Result<Value, String> {
         "document":{"title":doc.title,"sessionId":st.uid,"revision":st.revision,"colorMode":doc.color_mode,
             "sourceFormat":st.format,"activeArtboard":artboard,"artboards":doc.artboards.iter().take(100).collect::<Vec<_>>(),"artboardsTruncated":doc.artboards.len()>100},
         "colorSettings":colors,"plates":plates.iter().map(|p|json!({"name":p.name,"spot":p.spot})).collect::<Vec<_>>(),
-        "settings":{"trapping":settings.params(),"capture":{"dpi":settings.capture_dpi,"plate":plate},
+        "settings":{"development":lab::diagnostic_state(app,&settings,boundaries_current),"trapping":settings.params(),"capture":{"dpi":settings.capture_dpi,"plate":plate},
             "boundaries":{"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"minPixels":4},"preview":{"widthMm":settings.preview_width_mm,"reverse":settings.preview_reverse}},
         "panelStatus":{"failed":settings.failed,"message":settings.message},
         "selection":snapshot,"objects":object_samples(doc),
@@ -788,6 +798,7 @@ fn choose_zone(app: &mut VectorcraftApp, settings: &mut Settings, c: &BoundaryCa
         return;
     };
     settings.boundary_selected = Some(index);
+    settings.lab.pair = None;
     settings.curves = None;
     settings.preview = None;
     let ids: std::collections::BTreeSet<_> = zone["attribution"]["pairs"]
@@ -815,22 +826,7 @@ fn choose_zone(app: &mut VectorcraftApp, settings: &mut Settings, c: &BoundaryCa
 }
 
 fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settings) {
-    let artboard = app.session.active_index().and_then(|i| app.views.get(i)).map_or(0, |v| v.artboard);
-    let stale = settings.boundaries.as_ref().is_some_and(|c| {
-        c.dpi != settings.boundary_dpi
-            || c.contrast != settings.boundary_contrast
-            || c.artboard != artboard
-            || c.colors != vectorcraft_color::cms::active_settings()
-            || app.session.active().is_none_or(|st| !Arc::ptr_eq(&c.document, &st.doc))
-    });
-    if stale {
-        settings.boundaries = None;
-        settings.curves = None;
-        settings.preview = None;
-        settings.boundary_selected = None;
-        settings.message = "El documento o los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
-        settings.failed = false;
-    }
+    invalidate_boundaries(app, settings);
     egui::CollapsingHeader::new("Fronteras visibles · Fase 2").show(ui, |ui| {
         ui.label("Detecta encuentros entre tintas. Elige una zona para resaltar los sólidos originales relacionados.");
         let before = (settings.boundary_dpi, settings.boundary_contrast);
@@ -845,55 +841,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
             settings.failed = false;
         }
         if ui.add_enabled(app.session.active().is_some(), egui::Button::new("Detectar fronteras")).clicked() {
-            settings.boundaries = None;
-            settings.curves = None;
-            settings.preview = None;
-            settings.boundary_selected = None;
-            let result =
-                app.run("trapping.boundaries", json!({"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"artboard":artboard}));
-            let result = result.and_then(|mut report| {
-                let (texture, overlay, zone_map) = boundary_textures(ui, &report)?;
-                if let Some(obj) = report.as_object_mut() {
-                    obj.remove("dataBase64");
-                    obj.remove("overlayBase64");
-                    obj.remove("zoneMapBase64");
-                }
-                let source_labels = report["sourceObjects"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|o| {
-                        let id = o["id"].as_u64()?;
-                        let inks = o["plates"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" + ");
-                        Some((id, format!("{} · {inks}", o["name"].as_str().unwrap_or("Objeto"))))
-                    })
-                    .collect();
-                let st = app.session.active().ok_or("No hay documento activo.")?;
-                Ok(BoundaryCapture {
-                    document: st.doc.clone(),
-                    colors: vectorcraft_color::cms::active_settings(),
-                    dpi: settings.boundary_dpi,
-                    contrast: settings.boundary_contrast,
-                    artboard,
-                    report,
-                    texture,
-                    overlay,
-                    zone_map,
-                    source_labels,
-                })
-            });
-            match result {
-                Ok(c) => {
-                    settings.boundaries = Some(Arc::new(c));
-                    settings.boundary_page = 0;
-                    settings.failed = false;
-                    settings.message = "Mapa de candidatos listo. El documento no se modificó.".into();
-                }
-                Err(e) => {
-                    settings.message = e;
-                    settings.failed = true;
-                }
-            }
+            detect_boundaries(app, ui, settings);
         }
         widgets::dim_label(ui, "Experimental · Máximo 1 MP y 12 tintas. Comienza con 72 ppp; el cálculo puede tardar varios segundos.");
         if let Some(c) = settings.boundaries.clone() {
@@ -1052,19 +1000,7 @@ fn boundary_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut Settin
                                 }
                             }
                             if ui.button(format!("Verificar curvas del par {}", pair_index + 1)).clicked() {
-                                settings.curves = None;
-                                settings.preview = None;
-                                match app.run("trapping.verifyCurves", json!({"ids":pair["ids"],"region":zone["bounds"]})) {
-                                    Ok(report) => {
-                                        settings.curves = Some(Arc::new(CurveCheck { boundary: c.clone(), zone: index, pair: pair_index, report }));
-                                        settings.failed = false;
-                                        settings.message = "Curvas comprobadas por muestreo. El documento no se modificó.".into();
-                                    }
-                                    Err(e) => {
-                                        settings.failed = true;
-                                        settings.message = e;
-                                    }
-                                }
+                                verify_pair(app, settings, &c, index, pair_index);
                             }
                         }
                     });
@@ -1276,35 +1212,7 @@ fn local_preview_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut S
         settings.preview = None;
     }
     if ui.button("Previsualizar franja").clicked() {
-        settings.preview = None;
-        let result = (|| {
-            let mut report =
-                app.run("trapping.previewLocal", json!({"ids":ids,"region":check.report["region"],"widthMm":settings.preview_width_mm}))?;
-            let (texture, overlay) = preview_textures(ui, &report)?;
-            if let Some(obj) = report.as_object_mut() {
-                obj.remove("dataBase64");
-                obj.remove("overlayBase64");
-            }
-            Ok::<_, String>(LocalPreview {
-                check: check.clone(),
-                width_mm: settings.preview_width_mm,
-                reverse: settings.preview_reverse,
-                report,
-                texture,
-                overlay,
-            })
-        })();
-        match result {
-            Ok(preview) => {
-                settings.preview = Some(Arc::new(preview));
-                settings.failed = false;
-                settings.message = "Franja temporal lista. No se crearon objetos de trapping.".into();
-            }
-            Err(e) => {
-                settings.failed = true;
-                settings.message = e;
-            }
-        }
+        calculate_preview(app, ui, settings, check);
     }
     if let Some(preview) = settings.preview.clone() {
         ui.label(format!("Franja temporal · {:.2} mm", preview.width_mm));
@@ -1330,24 +1238,172 @@ fn local_preview_section(app: &mut VectorcraftApp, ui: &mut Ui, settings: &mut S
             "Incorporar crea esta franja con la tinta de origen en sobreimpresión, en una capa de trapping local. Se puede deshacer en un paso.",
         );
         if ui.button("Incorporar esta franja").clicked() {
-            match app.run("trapping.incorporateLocal", json!({"previewId":preview.report["previewId"]})) {
-                Ok(_) => {
-                    settings.preview = None;
-                    settings.curves = None;
-                    settings.boundaries = None;
-                    settings.boundary_selected = None;
-                    settings.analysis = None;
-                    clear_capture(ui, settings);
-                    settings.failed = false;
-                    settings.message = "Franja incorporada en KX27 · Trapping local, con sobreimpresión. Puedes deshacer en un paso.".into();
-                }
-                Err(e) => {
-                    settings.failed = true;
-                    settings.message = e;
-                    settings.preview = None;
-                }
-            }
+            incorporate_preview(app, ui, settings, &preview);
         }
         ui.label("Puedes exportar el diagnóstico JSON. Aplicar a la selección conserva su cálculo anterior.");
+    }
+}
+
+fn sync_document(app: &VectorcraftApp, ui: &Ui, settings: &mut Settings) {
+    settings.sanitize();
+    let doc_uid = app.session.active().map(|st| st.uid);
+    if settings.document != doc_uid {
+        clear_capture(ui, settings);
+        settings.boundaries = None;
+        settings.curves = None;
+        settings.preview = None;
+        settings.boundary_selected = None;
+        settings.analysis = None;
+        settings.message.clear();
+        settings.failed = false;
+        settings.export_message.clear();
+        settings.export_failed = false;
+        settings.document = doc_uid;
+
+        settings.lab = lab::State::default();
+    }
+}
+fn invalidate_boundaries(app: &VectorcraftApp, settings: &mut Settings) {
+    let artboard = app.session.active_index().and_then(|i| app.views.get(i)).map_or(0, |v| v.artboard);
+    let stale = settings.boundaries.as_ref().is_some_and(|c| {
+        c.dpi != settings.boundary_dpi
+            || c.contrast != settings.boundary_contrast
+            || c.artboard != artboard
+            || c.colors != vectorcraft_color::cms::active_settings()
+            || app.session.active().is_none_or(|st| !Arc::ptr_eq(&c.document, &st.doc))
+    });
+    if stale {
+        settings.boundaries = None;
+        settings.curves = None;
+        settings.preview = None;
+        settings.boundary_selected = None;
+        settings.message = "El documento o los ajustes cambiaron. Detecta las fronteras nuevamente.".into();
+        settings.failed = false;
+    }
+}
+fn detect_boundaries(app: &mut VectorcraftApp, ui: &Ui, settings: &mut Settings) {
+    let artboard = app.session.active_index().and_then(|i| app.views.get(i)).map_or(0, |v| v.artboard);
+
+    settings.boundaries = None;
+    settings.curves = None;
+    settings.preview = None;
+    settings.boundary_selected = None;
+    let result = app.run("trapping.boundaries", json!({"dpi":settings.boundary_dpi,"contrast":settings.boundary_contrast,"artboard":artboard}));
+    let result = result.and_then(|mut report| {
+        let (texture, overlay, zone_map) = boundary_textures(ui, &report)?;
+        if let Some(obj) = report.as_object_mut() {
+            obj.remove("dataBase64");
+            obj.remove("overlayBase64");
+            obj.remove("zoneMapBase64");
+        }
+        let source_labels = report["sourceObjects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|o| {
+                let id = o["id"].as_u64()?;
+                let inks = o["plates"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" + ");
+                Some((id, format!("{} · {inks}", o["name"].as_str().unwrap_or("Objeto"))))
+            })
+            .collect();
+        let st = app.session.active().ok_or("No hay documento activo.")?;
+        Ok(BoundaryCapture {
+            document: st.doc.clone(),
+            colors: vectorcraft_color::cms::active_settings(),
+            dpi: settings.boundary_dpi,
+            contrast: settings.boundary_contrast,
+            artboard,
+            report,
+            texture,
+            overlay,
+            zone_map,
+            source_labels,
+        })
+    });
+    match result {
+        Ok(c) => {
+            settings.boundaries = Some(Arc::new(c));
+            settings.boundary_page = 0;
+            settings.failed = false;
+            settings.message = "Mapa de candidatos listo. El documento no se modificó.".into();
+        }
+        Err(e) => {
+            settings.message = e;
+            settings.failed = true;
+        }
+    }
+}
+fn verify_pair(app: &mut VectorcraftApp, settings: &mut Settings, c: &Arc<BoundaryCapture>, zone: usize, pair: usize) {
+    let Some(z) = c.report["zones"].as_array().and_then(|v| v.get(zone)) else { return };
+    let Some(p) = z["attribution"]["pairs"].as_array().and_then(|v| v.get(pair)) else { return };
+    settings.lab.pair = Some(pair);
+    settings.curves = None;
+    settings.preview = None;
+    match app.run("trapping.verifyCurves", json!({"ids":p["ids"],"region":z["bounds"]})) {
+        Ok(report) => {
+            settings.curves = Some(Arc::new(CurveCheck { boundary: c.clone(), zone, pair, report }));
+            settings.failed = false;
+            settings.message = "Curvas comprobadas por muestreo. El documento no se modificó.".into();
+        }
+        Err(e) => {
+            settings.failed = true;
+            settings.message = e;
+        }
+    }
+}
+fn calculate_preview(app: &mut VectorcraftApp, ui: &Ui, settings: &mut Settings, check: &Arc<CurveCheck>) {
+    let mut ids = check.report["ids"].as_array().cloned().unwrap_or_default();
+    if settings.preview_reverse {
+        ids.reverse();
+    }
+
+    settings.preview = None;
+    let result = (|| {
+        let mut report = app.run("trapping.previewLocal", json!({"ids":ids,"region":check.report["region"],"widthMm":settings.preview_width_mm}))?;
+        let (texture, overlay) = preview_textures(ui, &report)?;
+        if let Some(obj) = report.as_object_mut() {
+            obj.remove("dataBase64");
+            obj.remove("overlayBase64");
+        }
+        Ok::<_, String>(LocalPreview {
+            check: check.clone(),
+            width_mm: settings.preview_width_mm,
+            reverse: settings.preview_reverse,
+            report,
+            texture,
+            overlay,
+        })
+    })();
+    match result {
+        Ok(preview) => {
+            settings.preview = Some(Arc::new(preview));
+            settings.failed = false;
+            settings.message = "Franja temporal lista. No se crearon objetos de trapping.".into();
+        }
+        Err(e) => {
+            settings.failed = true;
+            settings.message = e;
+        }
+    }
+}
+fn incorporate_preview(app: &mut VectorcraftApp, ui: &Ui, settings: &mut Settings, preview: &LocalPreview) {
+    match app.run("trapping.incorporateLocal", json!({"previewId":preview.report["previewId"]})) {
+        Ok(report) => {
+            settings.lab.receipt = app.session.active().map(|st| lab::Receipt { uid: st.uid, document: Arc::downgrade(&st.doc), report });
+            settings.lab.step = 5;
+            settings.preview = None;
+            settings.curves = None;
+            settings.boundaries = None;
+            settings.boundary_selected = None;
+            settings.analysis = None;
+            clear_capture(ui, settings);
+            settings.failed = false;
+            settings.message = "Franja incorporada en KX27 · Trapping local, con sobreimpresión. Puedes deshacer en un paso.".into();
+        }
+        Err(e) => {
+            settings.failed = true;
+            settings.message = e;
+            settings.preview = None;
+        }
     }
 }
